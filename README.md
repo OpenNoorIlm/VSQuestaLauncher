@@ -125,8 +125,4 @@ VSQuestaLauncher/
 └── COMMANDS.md
 ```
 
----
 
-## Author
-
-Built for **Bismillah** — SystemVerilog + Questa FSE workflow on Linux.
