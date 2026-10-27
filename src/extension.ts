@@ -160,7 +160,12 @@ function orderFiles(allFiles: string[], openedFile: string, conf: SvConf): strin
 
 // ─── run.do generator ────────────────────────────────────────────────────
 
-function generateRunDo(files: string[], conf: SvConf, cfg: vscode.WorkspaceConfiguration): string {
+function generateRunDo(
+  files: string[],
+  conf: SvConf,
+  cfg: vscode.WorkspaceConfiguration,
+  mode: 'cli' | 'gui' = 'gui'
+): string {
   const workLib = conf.workLib || 'work';
   const confVlog = conf.vlogArgs ? conf.vlogArgs : '';
   const allVlogArgs = ['-work', workLib, confVlog].filter(Boolean).join(' ');
@@ -189,9 +194,13 @@ function generateRunDo(files: string[], conf: SvConf, cfg: vscode.WorkspaceConfi
   doScript += `vlog ${allVlogArgs} ${fileList}\n`;
   doScript += `vopt +acc ${optTarget} -o ${optOut}\n`;
   doScript += `vsim ${vsimArgs ? vsimArgs + ' ' : ''}${optOut}\n`;
-  doScript += `add wave -r /*\n`;
+  if (mode === 'gui') {
+    doScript += `add wave -r /*\n`;
+  }
   doScript += `run -all\n`;
-
+  if (mode === 'cli') {
+    doScript += `quit -f\n`;
+  }
   return doScript;
 }
 
@@ -391,7 +400,7 @@ function defaultConfTemplate(openedBase: string, allBases: string[]): string {
 
 // ─── main run command ─────────────────────────────────────────────────────
 
-async function runQuesta(uri?: vscode.Uri): Promise<void> {
+async function runCli(uri?: vscode.Uri): Promise<void> {
   const editor = vscode.window.activeTextEditor;
   const fileUri = uri || editor?.document.uri;
   if (!fileUri) {
@@ -417,7 +426,8 @@ async function runQuesta(uri?: vscode.Uri): Promise<void> {
   const conf = parseConf(confPath);
   const ordered = orderFiles(allFiles, openedFile, conf);
   const runDoPath = path.join(dir, 'run.do');
-  const doContent = generateRunDo(ordered, conf, cfg);
+  // CLI mode: no 'add wave', ends with 'quit -f'
+  const doContent = generateRunDo(ordered, conf, cfg, 'cli');
 
   fs.writeFileSync(runDoPath, doContent, 'utf8');
 
@@ -431,13 +441,14 @@ async function runQuesta(uri?: vscode.Uri): Promise<void> {
   // Show output channel
   const channel = vscode.window.createOutputChannel('Questa Launcher');
   channel.show(true);
-  channel.appendLine(`▶ Questa Launcher`);
+  channel.appendLine(`▶ Questa Launcher  [CLI — headless, no waveform]`);
   channel.appendLine(`  Dir:    ${dir}`);
   channel.appendLine(`  Files:  ${ordered.map(f => path.basename(f)).join(', ')}`);
   channel.appendLine(`  run.do: ${runDoPath}`);
   channel.appendLine(`  vsim:   ${questa}`);
   channel.appendLine('─'.repeat(60));
 
+  // -c = console/batch mode (no GUI, no waveform window)
   const proc = child_process.spawn(
     questa,
     ['-c', '-do', `cd ${dir}; do run.do`],
@@ -451,7 +462,7 @@ async function runQuesta(uri?: vscode.Uri): Promise<void> {
     channel.appendLine('─'.repeat(60));
     if (code === 0) {
       channel.appendLine('✓ Simulation complete.');
-      vscode.window.showInformationMessage('✓ Questa simulation complete.');
+      vscode.window.showInformationMessage('✓ Questa CLI simulation complete.');
     } else {
       channel.appendLine(`✗ Questa exited with code ${code}`);
       vscode.window.showErrorMessage(`✗ Questa failed (exit ${code}). See Output → Questa Launcher.`);
@@ -853,31 +864,8 @@ async function runQuestaGui(uri?: vscode.Uri): Promise<void> {
   const ordered = orderFiles(allFiles, openedFile, conf);
   const runDoPath = path.join(dir, 'run.do');
 
-  // GUI run.do — same compile + vopt + vsim but keep GUI open with wave + log
-  const workLib = conf.workLib || 'work';
-  const confVlog = conf.vlogArgs || '';
-  const allVlogArgs = ['-work', workLib, confVlog].filter(Boolean).join(' ');
-  const fileList = ordered.map((f: string) => path.basename(f)).join(' ');
-
-  const tbFile = conf.tbName
-    || ordered.map((f: string) => path.basename(f)).find((b: string) => b.includes('_tb') || b.startsWith('tb_'))
-    || '';
-  const topModule = conf.topModule
-    || (tbFile ? tbFile.replace(/\.sv$/i, '') : '')
-    || path.basename(ordered[ordered.length - 1]).replace(/\.sv$/i, '');
-
-  const optTarget = `${workLib}.${topModule}`;
-  const optOut    = `${topModule}_opt`;
-  const vsimArgs  = conf.vsimArgs || '';
-
-  let guiDo = `quietly vlib ${workLib}\n`;
-  guiDo += `vlog ${allVlogArgs} ${fileList}\n`;
-  guiDo += `vopt +acc ${optTarget} -o ${optOut}\n`;
-  guiDo += `vsim ${vsimArgs ? vsimArgs + ' ' : ''}${optOut}\n`;
-  guiDo += `add wave -r /*\n`;
-  guiDo += `run -all\n`;
-  // Do NOT quit — leave GUI open for user to inspect waveforms
-
+  // GUI mode: vlib + vlog + vopt + vsim + add wave -r /* + run -all (no quit — keeps GUI open)
+  const guiDo = generateRunDo(ordered, conf, cfg, 'gui');
   fs.writeFileSync(runDoPath, guiDo, 'utf8');
 
   const questa = resolveQuesta(cfg);
@@ -885,12 +873,22 @@ async function runQuestaGui(uri?: vscode.Uri): Promise<void> {
   const questaDir = path.dirname(questa);
   if (questaDir && questaDir !== '.') env['PATH'] = questaDir + ':' + (env['PATH'] || '');
 
+  // Derive top module name for log
+  const conf2 = parseConf(confPath);
+  const tbFile2 = conf2.tbName
+    || ordered.map((f: string) => path.basename(f)).find((b: string) => b.includes('_tb') || b.startsWith('tb_'))
+    || '';
+  const topModule2 = conf2.topModule
+    || (tbFile2 ? tbFile2.replace(/\.sv$/i, '') : '')
+    || path.basename(ordered[ordered.length - 1]).replace(/\.sv$/i, '');
+
   const channel = vscode.window.createOutputChannel('Questa Launcher');
   channel.show(true);
-  channel.appendLine(`🖥 Questa GUI Launch`);
+  channel.appendLine(`🖥 Questa Launcher  [GUI — with waveforms]`);
   channel.appendLine(`  Dir:   ${dir}`);
   channel.appendLine(`  Files: ${ordered.map((f: string) => path.basename(f)).join(', ')}`);
-  channel.appendLine(`  Top:   ${topModule}`);
+  channel.appendLine(`  Top:   ${topModule2}`);
+  channel.appendLine(`  run.do: ${runDoPath}`);
   channel.appendLine('─'.repeat(60));
 
   // Launch WITHOUT -c so the GUI opens; detached so it outlives VS Code
@@ -901,8 +899,68 @@ async function runQuestaGui(uri?: vscode.Uri): Promise<void> {
   );
   proc.unref();
 
-  vscode.window.showInformationMessage(`🖥 Questa GUI launched for ${topModule} — waveforms will open automatically.`);
+  vscode.window.showInformationMessage(`🖥 Questa GUI launched for ${topModule2} — waveforms loading automatically.`);
   channel.appendLine(`✓ Questa GUI launched (PID detached). Close the Questa window when done.`);
+}
+
+
+
+// ─── show waveform (open existing vsim.wlf in GUI) ───────────────────────
+
+async function showWaveform(uri?: vscode.Uri): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  const fileUri = uri || editor?.document.uri;
+  if (!fileUri) { vscode.window.showErrorMessage('No .sv file open.'); return; }
+
+  const dir = path.dirname(fileUri.fsPath);
+  const wlfPath = path.join(dir, 'vsim.wlf');
+  const cfg = vscode.workspace.getConfiguration('questaLauncher');
+
+  // If no WLF yet, prompt user to run a simulation first
+  if (!fs.existsSync(wlfPath)) {
+    const choice = await vscode.window.showWarningMessage(
+      'No vsim.wlf found in this directory. Run a simulation first to generate the waveform file.',
+      'Run CLI (headless)',
+      'Run GUI (with waveforms)'
+    );
+    if (choice === 'Run CLI (headless)') await runCli(uri);
+    else if (choice === 'Run GUI (with waveforms)') await runQuestaGui(uri);
+    return;
+  }
+
+  const questa = resolveQuesta(cfg);
+  const env = resolveEnv(cfg);
+  const questaDir = path.dirname(questa);
+  if (questaDir && questaDir !== '.') env['PATH'] = questaDir + ':' + (env['PATH'] || '');
+
+  // Write a small wave.do using the official Questa waveform command from run.do
+  const waveDo = path.join(dir, 'wave.do');
+  fs.writeFileSync(waveDo,
+    `# wave.do — generated by VSQuestaLauncher (Show WaveForm)\n` +
+    `add wave -r /*\n` +
+    `wave zoom full\n`,
+    'utf8'
+  );
+
+  const channel = vscode.window.createOutputChannel('Questa Launcher');
+  channel.show(true);
+  channel.appendLine(`〰 Questa Launcher  [Show WaveForm only]`);
+  channel.appendLine(`  WLF:    ${wlfPath}`);
+  channel.appendLine(`  wave.do: ${waveDo}`);
+  channel.appendLine(`  vsim:   ${questa}`);
+  channel.appendLine('─'.repeat(60));
+
+  // Launch Questa GUI to view the existing WLF — detached so it outlives VS Code
+  // vsim -view <wlf> loads the simulation log without re-running; -do adds the wave signals
+  const proc = child_process.spawn(
+    questa,
+    ['-view', wlfPath, '-do', waveDo],
+    { cwd: dir, env, detached: true, stdio: 'ignore' }
+  );
+  proc.unref();
+
+  vscode.window.showInformationMessage(`〰 WaveForm viewer opened — loading vsim.wlf`);
+  channel.appendLine(`✓ Questa WaveForm viewer launched (PID detached).`);
 }
 
 
@@ -1031,11 +1089,12 @@ async function setPriority(uri?: vscode.Uri): Promise<void> {
 
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
-    vscode.commands.registerCommand('questaLauncher.run', runQuesta),
-    vscode.commands.registerCommand('questaLauncher.runGui', runQuestaGui),
-    vscode.commands.registerCommand('questaLauncher.editConf', editConf),
-    vscode.commands.registerCommand('questaLauncher.setPriority', setPriority),
-    vscode.commands.registerCommand('questaLauncher.setLicense', setLicense),
+    vscode.commands.registerCommand('questaLauncher.run',           runCli),
+    vscode.commands.registerCommand('questaLauncher.runGui',        runQuestaGui),
+    vscode.commands.registerCommand('questaLauncher.showWaveform',  showWaveform),
+    vscode.commands.registerCommand('questaLauncher.editConf',      editConf),
+    vscode.commands.registerCommand('questaLauncher.setPriority',   setPriority),
+    vscode.commands.registerCommand('questaLauncher.setLicense',    setLicense),
     vscode.commands.registerCommand('questaLauncher.helpDocs', () => showHelpDocs(context)),
     vscode.commands.registerCommand('questaLauncher.helpDeps', () => showHelpDeps(context))
   );

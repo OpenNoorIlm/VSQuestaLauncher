@@ -4,6 +4,7 @@
   "description": "Run Questa simulations on SystemVerilog files with priority ordering and conf.svconf support",
   "version": "1.8.0",
   "publisher": "bismillah",
+  "engines": { "vscode": "^1.80.0" },
   "repository": { "type": "git", "url": "https://github.com/bismillah/questa-launcher" },
   "categories": ["Other"],
   "activationEvents": [
@@ -14,8 +15,9 @@
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
-      { "command": "questaLauncher.run", "title": "▶ Run in Questa", "icon": "$(play)" },
-      { "command": "questaLauncher.runGui", "title": "🖥 Open Questa GUI", "icon": "$(device-desktop)" },
+      { "command": "questaLauncher.run",           "title": "▶ Run CLI",          "icon": "$(play)" },
+      { "command": "questaLauncher.runGui",         "title": "🖥 Run GUI",          "icon": "$(device-desktop)" },
+      { "command": "questaLauncher.showWaveform",   "title": "〰 Show WaveForm",    "icon": "$(symbol-event)" },
       { "command": "questaLauncher.editConf", "title": "⚙ Edit conf.svconf", "icon": "$(settings-gear)" },
       { "command": "questaLauncher.setPriority", "title": "⇅ Set Compile Priority", "icon": "$(list-ordered)" },
       { "command": "questaLauncher.setLicense", "title": "🔑 Set License", "icon": "$(key)" },
@@ -24,23 +26,25 @@
     ],
     "menus": {
       "editor/title": [
-        { "command": "questaLauncher.run",      "when": "resourceExtname == .sv", "group": "navigation@1" },
-        { "command": "questaLauncher.runGui",   "when": "resourceExtname == .sv", "group": "navigation@2" },
-        { "command": "questaLauncher.setLicense","when": "resourceExtname == .sv", "group": "navigation@3" },
-        { "command": "questaLauncher.setPriority","when": "resourceExtname == .sv", "group": "navigation@4" },
-        { "command": "questaLauncher.editConf", "when": "resourceExtname == .sv", "group": "navigation@5" },
-        { "command": "questaLauncher.helpDocs", "when": "resourceExtname == .sv", "group": "navigation@6" },
-        { "command": "questaLauncher.helpDeps", "when": "resourceExtname == .sv", "group": "navigation@7" },
-        { "command": "questaLauncher.setLicense","when": "resourceFilename == conf.svconf", "group": "navigation@1" },
-        { "command": "questaLauncher.editConf", "when": "resourceFilename == conf.svconf", "group": "navigation@2" },
-        { "command": "questaLauncher.helpDocs", "when": "resourceFilename == conf.svconf", "group": "navigation@3" }
+        { "command": "questaLauncher.run",           "when": "resourceExtname == .sv", "group": "navigation@1" },
+        { "command": "questaLauncher.runGui",         "when": "resourceExtname == .sv", "group": "navigation@2" },
+        { "command": "questaLauncher.showWaveform",   "when": "resourceExtname == .sv", "group": "navigation@3" },
+        { "command": "questaLauncher.setLicense",     "when": "resourceExtname == .sv", "group": "navigation@4" },
+        { "command": "questaLauncher.setPriority",    "when": "resourceExtname == .sv", "group": "navigation@5" },
+        { "command": "questaLauncher.editConf",       "when": "resourceExtname == .sv", "group": "navigation@6" },
+        { "command": "questaLauncher.helpDocs",       "when": "resourceExtname == .sv", "group": "navigation@7" },
+        { "command": "questaLauncher.helpDeps",       "when": "resourceExtname == .sv", "group": "navigation@8" },
+        { "command": "questaLauncher.setLicense",     "when": "resourceFilename == conf.svconf", "group": "navigation@1" },
+        { "command": "questaLauncher.editConf",       "when": "resourceFilename == conf.svconf", "group": "navigation@2" },
+        { "command": "questaLauncher.helpDocs",       "when": "resourceFilename == conf.svconf", "group": "navigation@3" }
       ],
       "editor/title/run": [
-        { "command": "questaLauncher.run",      "when": "resourceExtname == .sv", "group": "navigation@1" },
-        { "command": "questaLauncher.runGui",   "when": "resourceExtname == .sv", "group": "navigation@2" },
-        { "command": "questaLauncher.setLicense","when": "resourceExtname == .sv", "group": "navigation@3" },
-        { "command": "questaLauncher.helpDocs", "when": "resourceExtname == .sv", "group": "navigation@4" },
-        { "command": "questaLauncher.helpDeps", "when": "resourceExtname == .sv", "group": "navigation@5" }
+        { "command": "questaLauncher.run",          "when": "resourceExtname == .sv", "group": "navigation@1" },
+        { "command": "questaLauncher.runGui",       "when": "resourceExtname == .sv", "group": "navigation@2" },
+        { "command": "questaLauncher.showWaveform", "when": "resourceExtname == .sv", "group": "navigation@3" },
+        { "command": "questaLauncher.setLicense",   "when": "resourceExtname == .sv", "group": "navigation@4" },
+        { "command": "questaLauncher.helpDocs",     "when": "resourceExtname == .sv", "group": "navigation@5" },
+        { "command": "questaLauncher.helpDeps",     "when": "resourceExtname == .sv", "group": "navigation@6" }
       ],
       "explorer/context": [
         { "command": "questaLauncher.run", "when": "resourceExtname == .sv", "group": "questa@1" },

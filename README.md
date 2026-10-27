@@ -1,7 +1,7 @@
 # Questa Launcher — VS Code Extension
 
 <p align="center">
-  <img src="images/questa_launcher.svg" width="96" alt="Questa Launcher Logo"/>
+  <img src="images/questa_launcher.png" width="96" alt="Questa Launcher Logo"/>
 </p>
 
 **Questa Launcher** is a VS Code / VS Code Insiders extension that lets you compile and simulate SystemVerilog designs directly from the editor using **Questa Altera FSE (Starter Edition)** — no terminal required.
@@ -12,7 +12,9 @@
 
 | Button | Action |
 |---|---|
-| ▶ Run in Questa | Headless compile + simulate, output streamed to the Output panel |
+| ▶ Run CLI | Headless compile + simulate — output streamed to the Output panel, **no waveform window** |
+| 🖥 Run GUI | Compiles, runs, opens full Questa GUI with waveforms loaded automatically |
+| 〰 Show WaveForm | Opens existing `vsim.wlf` in the Questa waveform viewer without re-running the simulation |
 | 🖥 GUI | Opens full Questa GUI with waveforms pre-loaded and `run -all` executed |
 | ⇅ Priority | Pick compile order for all `.sv` files in the directory |
 | 🔑 License | Set `SALT_LICENSE_SERVER`, `LM_LICENSE_FILE`, or browse for a `.dat` file |
