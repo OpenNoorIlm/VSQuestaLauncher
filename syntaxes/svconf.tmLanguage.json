@@ -1,0 +1,34 @@
+{
+  "name": "SV Config",
+  "scopeName": "source.svconf",
+  "fileTypes": ["svconf"],
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#directive" },
+    { "include": "#keyword" },
+    { "include": "#string" },
+    { "include": "#number" }
+  ],
+  "repository": {
+    "comment": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.svconf"
+    },
+    "directive": {
+      "match": "@[a-zA-Z_ ]+:",
+      "name": "keyword.control.svconf"
+    },
+    "keyword": {
+      "match": "\\b(compile|all|priority|list|encoder|topmodule|vsim|vlog|work|tb)\\b",
+      "name": "storage.type.svconf"
+    },
+    "string": {
+      "match": "\"[^\"]*\"",
+      "name": "string.quoted.double.svconf"
+    },
+    "number": {
+      "match": "\\b[0-9]+\\b",
+      "name": "constant.numeric.svconf"
+    }
+  }
+}
