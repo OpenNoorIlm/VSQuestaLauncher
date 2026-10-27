@@ -522,28 +522,49 @@ function buildHelpPanel(
   const body = mdToHtml(mdContent);
 
   // Parse command blocks for the run buttons (deps panel only)
-  const commandBlocks: { os: string; label: string; cmd: string }[] = [];
+  const commandBlocks: { os: string; label: string; cmd: string; section: string; desc: string }[] = [];
   if (isDeps) {
     const cmdFile = fs.readFileSync(
       path.join(context.extensionPath, 'COMMANDS.md'), 'utf8'
     );
-    // Extract fenced code blocks with their preceding heading
+    let lastSection = '';
     let lastHeading = '';
+    let lastDesc = '';
     const lines = cmdFile.split('\n');
     let inBlock = false;
     let blockLines: string[] = [];
     for (const line of lines) {
-      if (/^#{1,3} /.test(line)) { lastHeading = line.replace(/^#+\s*/, ''); inBlock = false; blockLines = []; }
+      // ## Section heading
+      if (/^## /.test(line)) {
+        lastSection = line.replace(/^#+\s*/, '').trim();
+        lastDesc = '';
+        continue;
+      }
+      // ### Command heading
+      if (/^### /.test(line)) {
+        lastHeading = line.replace(/^#+\s*/, '').trim();
+        inBlock = false; blockLines = []; lastDesc = '';
+        continue;
+      }
+      // Fenced code block toggle
       if (line.startsWith('```')) {
         if (!inBlock) { inBlock = true; blockLines = []; }
         else {
           const cmd = blockLines.join('\n').trim();
-          if (cmd) commandBlocks.push({ os: lastHeading, label: lastHeading, cmd });
+          if (cmd) commandBlocks.push({
+            os: lastHeading, label: lastHeading, cmd,
+            section: lastSection, desc: lastDesc
+          });
           inBlock = false; blockLines = [];
         }
         continue;
       }
-      if (inBlock) blockLines.push(line);
+      if (inBlock) { blockLines.push(line); continue; }
+      // Description: non-empty non-heading text between ### and ``` becomes the desc
+      const stripped = line.replace(/^>\s*/, '').trim();
+      if (stripped && !stripped.startsWith('#') && !stripped.startsWith('---')) {
+        lastDesc = stripped;
+      }
     }
   }
 
@@ -556,6 +577,365 @@ function buildHelpPanel(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${title}</title>
 <style>
+  :root {
+    --bg:#0d0d1a; --bg2:#111827; --border:#1e3a5f;
+    --cyan:#00e5ff; --blue:#0057a8; --blue2:#00b4d8;
+    --text:#cdd6e0; --muted:#4a6680; --green:#50c878;
+    --red:#ff4f4f; --yellow:#ffd700;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;line-height:1.7;}
+
+  /* Header */
+  .header{background:linear-gradient(135deg,#0a0a18,#0a1628);border-bottom:1px solid var(--border);
+    padding:20px 28px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:20;}
+  .header h1{font-size:18px;color:var(--cyan);letter-spacing:1px;}
+  .header p{font-size:12px;color:var(--muted);margin-top:2px;}
+
+  /* Tabs */
+  .tabs{display:flex;border-bottom:1px solid var(--border);background:var(--bg2);padding:0 28px;gap:4px;}
+  .tab{padding:10px 18px;cursor:pointer;border:none;background:none;color:var(--muted);font-size:13px;
+    border-bottom:2px solid transparent;transition:all .2s;}
+  .tab:hover{color:var(--text);}
+  .tab.active{color:var(--cyan);border-bottom-color:var(--cyan);}
+
+  /* Content */
+  .content{padding:28px;max-width:900px;}
+  .page{display:none;}
+  .page.active{display:block;}
+
+  h1{font-size:22px;color:var(--cyan);margin:24px 0 12px;}
+  h2{font-size:17px;color:var(--blue2);margin:20px 0 10px;border-bottom:1px solid var(--border);padding-bottom:6px;}
+  h3{font-size:14px;color:var(--yellow);margin:16px 0 8px;}
+  p{margin:8px 0;color:var(--text);}
+  hr{border:none;border-top:1px solid var(--border);margin:20px 0;}
+  code{background:#0a1628;color:var(--cyan);padding:1px 6px;border-radius:4px;font-family:'Courier New',monospace;font-size:12px;}
+  pre{background:#080f1e;border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:12px 0;}
+  pre code{background:none;color:#a8d8ea;padding:0;font-size:12px;}
+  strong{color:#fff;}
+  table{width:100%;border-collapse:collapse;margin:12px 0;}
+  tr{border-bottom:1px solid var(--border);}
+  td,th{padding:8px 12px;text-align:left;font-size:13px;}
+  tr:first-child td{color:var(--cyan);font-weight:bold;background:#0a1628;}
+
+  /* Badges */
+  .os-badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:bold;margin-right:4px;}
+  .os-linux{background:#1a3a1a;color:var(--green);}
+  .os-windows{background:#1a1a3a;color:#7aa7ff;}
+  .sec-badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:bold;margin-right:4px;}
+  .sec-build{background:#2a1a00;color:#ffd700;border:1px solid #5a3a00;}
+  .sec-install{background:#1a0a2a;color:#c084fc;border:1px solid #4a1a6f;}
+  .sec-cli{background:#0a1628;color:var(--cyan);border:1px solid var(--border);}
+  .sec-gui{background:#0a1628;color:#c084fc;border:1px solid #4a1a6f;}
+
+  /* Section group */
+  .section-group{margin:28px 0;}
+  .section-header{display:flex;justify-content:space-between;align-items:center;
+    padding:12px 18px;background:linear-gradient(90deg,#0a1628,#060c18);
+    border-radius:10px 10px 0 0;border:1px solid var(--border);border-bottom:2px solid var(--cyan);}
+  .section-title{font-size:15px;font-weight:bold;color:var(--cyan);}
+  .section-count{font-size:11px;color:var(--muted);margin-left:8px;font-weight:normal;}
+  .btn-run-all{background:linear-gradient(90deg,#0057a8,#00b4d8);color:#fff;
+    border:none;border-radius:6px;padding:7px 18px;cursor:pointer;font-size:12px;font-weight:bold;transition:all .2s;}
+  .btn-run-all:hover{opacity:.85;transform:scale(1.02);}
+
+  /* Command block */
+  .cmd-block{background:#080f1e;border:1px solid var(--border);border-top:none;overflow:hidden;}
+  .cmd-block:last-child{border-radius:0 0 10px 10px;}
+  .cmd-header{display:flex;justify-content:space-between;align-items:center;
+    padding:10px 16px;background:#0a1020;border-bottom:1px solid #0d1e35;}
+  .cmd-label{font-size:12px;color:var(--blue2);font-weight:bold;}
+  .cmd-desc{padding:6px 16px 8px;font-size:12px;color:#7fbfff;font-style:italic;border-bottom:1px solid #0d1e35;background:#06090f;}
+  .cmd-body{padding:14px 16px;}
+  .cmd-body pre{margin:0;border:none;background:none;padding:0;}
+  .btn{display:inline-flex;align-items:center;gap:5px;padding:5px 12px;border:none;border-radius:6px;
+    cursor:pointer;font-size:11px;font-weight:bold;transition:all .2s;}
+  .btn-run{background:linear-gradient(90deg,var(--blue),var(--blue2));color:#fff;}
+  .btn-run:hover{opacity:.85;}
+  .btn-copy{background:#1e3a5f;color:var(--cyan);}
+  .btn-copy:hover{background:#254d7a;}
+  .btn-group{display:flex;gap:6px;}
+
+  /* Log bar */
+  #depLog{background:#04080f;border:1px solid var(--border);border-radius:8px;
+    padding:10px 14px;font-family:monospace;font-size:12px;color:#7fbfff;margin-bottom:20px;}
+
+  /* Approval overlay */
+  #approvalOverlay{display:none;position:sticky;top:0;z-index:50;
+    background:rgba(0,0,0,.85);backdrop-filter:blur(4px);
+    padding:20px;border-radius:12px;margin-bottom:20px;border:2px solid var(--cyan);}
+  .apv-progress{color:var(--yellow);font-size:11px;font-weight:bold;margin-bottom:10px;letter-spacing:1px;}
+  .apv-label{color:var(--cyan);font-size:14px;font-weight:bold;margin-bottom:6px;}
+  .apv-desc{color:#7fbfff;font-size:12px;font-style:italic;margin-bottom:12px;}
+  .apv-cmd{background:#04080f;border:1px solid var(--border);border-radius:6px;
+    padding:12px;overflow-x:auto;margin-bottom:14px;}
+  .apv-cmd code{color:#a8d8ea;font-size:12px;font-family:'Courier New',monospace;white-space:pre;}
+  .apv-btns{display:flex;gap:10px;flex-wrap:wrap;}
+  .btn-approve{background:linear-gradient(90deg,#1a6a1a,#22c55e);color:#fff;padding:8px 20px;font-size:13px;}
+  .btn-skip{background:#1e3a5f;color:var(--cyan);padding:8px 16px;font-size:13px;}
+  .btn-cancel{background:#3a1a1a;color:var(--red);padding:8px 16px;font-size:13px;}
+  .apv-done{color:var(--green);font-size:14px;font-weight:bold;padding:8px 0;}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <svg width="46" height="46" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="hbg" x1="0%" y1="0%" x2="100%" y2="100%">
+        <stop offset="0%" style="stop-color:#0d0d1a"/><stop offset="100%" style="stop-color:#0a1628"/>
+      </linearGradient>
+      <linearGradient id="hbtn" x1="0%" y1="0%" x2="100%" y2="0%">
+        <stop offset="0%" style="stop-color:#0057a8"/><stop offset="100%" style="stop-color:#00b4d8"/>
+      </linearGradient>
+      <filter id="hglow"><feGaussianBlur stdDeviation="1.5" result="blur"/>
+        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    </defs>
+    <rect width="100" height="100" rx="16" fill="url(#hbg)"/>
+    <g stroke="#00e5ff" stroke-width="0.3" opacity="0.15">
+      <line x1="25" y1="0" x2="25" y2="100"/><line x1="50" y1="0" x2="50" y2="100"/>
+      <line x1="75" y1="0" x2="75" y2="100"/><line x1="0" y1="25" x2="100" y2="25"/>
+      <line x1="0" y1="50" x2="100" y2="50"/><line x1="0" y1="75" x2="100" y2="75"/>
+    </g>
+    <g stroke="#00e5ff" stroke-width="2.5" fill="none" opacity="0.9" filter="url(#hglow)">
+      <polyline points="8,20 8,8 20,8"/><polyline points="80,8 92,8 92,20"/>
+      <polyline points="8,80 8,92 20,92"/><polyline points="80,92 92,92 92,80"/>
+    </g>
+    <polygon points="50,18 68,28 68,52 50,62 32,52 32,28" fill="none" stroke="#00e5ff" stroke-width="1.5" opacity="0.5"/>
+    <polygon points="42,34 42,56 63,45" fill="url(#hbtn)" filter="url(#hglow)"/>
+    <text x="50" y="80" text-anchor="middle" font-family="Courier New,monospace" font-size="7" fill="#00e5ff" letter-spacing="2" opacity="0.85">QUESTA</text>
+    <text x="50" y="89" text-anchor="middle" font-family="Courier New,monospace" font-size="5" fill="#446688" letter-spacing="1.5">LAUNCHER</text>
+  </svg>
+  <div>
+    <h1>${title}</h1>
+    <p>VSQuestaLauncher v1.8 — SystemVerilog simulation for VS Code</p>
+  </div>
+</div>
+
+<div class="tabs">
+  <button class="tab active" onclick="showTab('readme',this)">📖 README</button>
+  <button class="tab" onclick="showTab('deps',this)">📦 Dependencies</button>
+  <button class="tab" onclick="showTab('commands',this)">⌨ Commands</button>
+</div>
+
+<div class="content">
+
+  <!-- README -->
+  <div id="readme" class="page active">${body}</div>
+
+  <!-- DEPS -->
+  <div id="deps" class="page">
+    <h2>📦 Dependency Resolver</h2>
+    <p style="margin-bottom:14px">Each section shows its commands grouped by OS.
+      Click <strong>▶ Run</strong> to send a single command to the terminal, or
+      <strong>▶ Run All</strong> to step through the entire section — each command requires your approval before it executes.</p>
+
+    <!-- Approval overlay (sticky, shown during Run All) -->
+    <div id="approvalOverlay"></div>
+
+    <!-- Status bar -->
+    <div id="depLog">Ready — click ▶ Run on any block, or ▶ Run All on a section.</div>
+
+    <!-- Command blocks injected here -->
+    <div id="cmdBlocks"></div>
+  </div>
+
+  <!-- COMMANDS ref (rendered markdown) -->
+  <div id="commands" class="page">
+    <h2>⌨ Commands Reference</h2>
+    <div id="cmdRef"><p style="color:var(--muted)">Loading…</p></div>
+  </div>
+
+</div>
+
+<script>
+const vscode = acquireVsCodeApi();
+const blocks = ${blocksJson};
+
+// ── tab switching ──────────────────────────────────────────────────────────
+function showTab(id, btn) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  if (btn) btn.classList.add('active');
+  if (id === 'deps')     buildDepBlocks();
+  if (id === 'commands') buildCmdRef();
+}
+
+// ── helpers ────────────────────────────────────────────────────────────────
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function osTag(label) {
+  if (/windows/i.test(label)) return '<span class="os-badge os-windows">Windows</span>';
+  if (/linux/i.test(label))   return '<span class="os-badge os-linux">Linux</span>';
+  return '';
+}
+
+function secBadge(sec) {
+  if (/^Build/i.test(sec))   return '<span class="sec-badge sec-build">🔨 Build</span>';
+  if (/^Install/i.test(sec)) return '<span class="sec-badge sec-install">📦 Install</span>';
+  if (/^CLI/i.test(sec))     return '<span class="sec-badge sec-cli">⌨ CLI</span>';
+  if (/^GUI/i.test(sec))     return '<span class="sec-badge sec-gui">🖥 GUI</span>';
+  return '';
+}
+
+function sectionIcon(sec) {
+  if (/^Build/i.test(sec))   return '🔨';
+  if (/^Install/i.test(sec)) return '📦';
+  if (/^CLI/i.test(sec))     return '⌨';
+  if (/^GUI/i.test(sec))     return '🖥';
+  return '📋';
+}
+
+// ── build dep blocks (grouped by section) ─────────────────────────────────
+function buildDepBlocks() {
+  const el = document.getElementById('cmdBlocks');
+  if (el.dataset.built) return;
+  el.dataset.built = '1';
+  if (!blocks.length) { el.innerHTML = '<p style="color:var(--muted)">No command blocks found in COMMANDS.md.</p>'; return; }
+
+  // Group blocks by section, preserving order
+  const secOrder = [];
+  const secMap = {};
+  blocks.forEach((b, i) => {
+    if (!secMap[b.section]) { secMap[b.section] = []; secOrder.push(b.section); }
+    secMap[b.section].push({ ...b, idx: i });
+  });
+
+  let html = '';
+  for (const sec of secOrder) {
+    const grp = secMap[sec];
+    const icon = sectionIcon(sec);
+    html += \`
+      <div class="section-group">
+        <div class="section-header">
+          <span class="section-title">\${icon} \${esc(sec)} <span class="section-count">\${grp.length} command\${grp.length>1?'s':''}</span></span>
+          <button class="btn btn-run-all" onclick="startRunAll('\${esc(sec)}')">▶ Run All</button>
+        </div>
+        \${grp.map(b => \`
+          <div class="cmd-block">
+            <div class="cmd-header">
+              <span class="cmd-label">\${osTag(b.label)} \${esc(b.label)}</span>
+              <div class="btn-group">
+                <button class="btn btn-copy" onclick="copyCmd(\${b.idx})">📋 Copy</button>
+                <button class="btn btn-run"  onclick="runCmdSingle(\${b.idx})">▶ Run</button>
+              </div>
+            </div>
+            \${b.desc ? \`<div class="cmd-desc">\${esc(b.desc)}</div>\` : ''}
+            <div class="cmd-body"><pre><code>\${esc(b.cmd)}</code></pre></div>
+          </div>
+        \`).join('')}
+      </div>
+    \`;
+  }
+  el.innerHTML = html;
+}
+
+// ── single run ─────────────────────────────────────────────────────────────
+function runCmdSingle(i) {
+  const log = document.getElementById('depLog');
+  log.style.color = '#7fbfff';
+  log.textContent = '▶ Sending to terminal: ' + blocks[i].label + '…';
+  vscode.postMessage({ type: 'runCmd', cmd: blocks[i].cmd, label: blocks[i].label });
+}
+
+function copyCmd(i) {
+  vscode.postMessage({ type: 'copy', text: blocks[i].cmd });
+}
+
+// ── Run All — step-through with approval ───────────────────────────────────
+let runQueue = [], runIdx = 0;
+
+function startRunAll(section) {
+  runQueue = blocks.filter(b => b.section === section);
+  runIdx   = 0;
+  showApprovalStep();
+}
+
+function showApprovalStep() {
+  const ov  = document.getElementById('approvalOverlay');
+  const log = document.getElementById('depLog');
+
+  if (runIdx >= runQueue.length) {
+    ov.style.display = 'block';
+    ov.innerHTML = \`<div class="apv-done">✅ All \${runQueue.length} commands in "\${esc(runQueue[0]?.section||'')}" sent to terminal.</div>
+      <button class="btn btn-copy" style="margin-top:8px" onclick="closeApproval()">Close</button>\`;
+    log.style.color = 'var(--green)';
+    log.textContent = '✓ Run All complete — ' + runQueue.length + ' commands sent.';
+    return;
+  }
+
+  const b = runQueue[runIdx];
+  ov.style.display = 'block';
+  ov.innerHTML = \`
+    <div class="apv-progress">STEP \${runIdx+1} OF \${runQueue.length} &nbsp;·&nbsp; \${esc(b.section)}</div>
+    <div class="apv-label">\${osTag(b.label)} \${esc(b.label)}</div>
+    \${b.desc ? \`<div class="apv-desc">\${esc(b.desc)}</div>\` : ''}
+    <div class="apv-cmd"><code>\${esc(b.cmd)}</code></div>
+    <div class="apv-btns">
+      <button class="btn btn-approve btn-run" onclick="approveStep()">✓ Approve &amp; Run</button>
+      <button class="btn btn-skip   btn-copy" onclick="skipStep()">⏭ Skip</button>
+      <button class="btn btn-cancel"          onclick="cancelRunAll()">✗ Cancel</button>
+    </div>
+  \`;
+
+  // Scroll the overlay into view
+  ov.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function approveStep() {
+  const b   = runQueue[runIdx];
+  const log = document.getElementById('depLog');
+  log.style.color = '#7fbfff';
+  log.textContent = \`▶ [\${runIdx+1}/\${runQueue.length}] \${b.label}\`;
+  vscode.postMessage({ type: 'runCmd', cmd: b.cmd, label: b.label });
+  runIdx++;
+  setTimeout(showApprovalStep, 400);
+}
+
+function skipStep() { runIdx++; showApprovalStep(); }
+
+function cancelRunAll() {
+  const log = document.getElementById('depLog');
+  log.style.color = 'var(--red)';
+  log.textContent = \`✗ Run All cancelled at step \${runIdx+1} of \${runQueue.length}.\`;
+  closeApproval();
+}
+
+function closeApproval() {
+  const ov = document.getElementById('approvalOverlay');
+  ov.style.display = 'none';
+  ov.innerHTML = '';
+}
+
+// ── commands reference page (rendered markdown) ───────────────────────────
+function buildCmdRef() {
+  vscode.postMessage({ type: 'getCommands' });
+}
+
+// ── messages from extension ───────────────────────────────────────────────
+window.addEventListener('message', e => {
+  const msg = e.data;
+  if (msg.type === 'cmdResult') {
+    const log = document.getElementById('depLog');
+    log.textContent  = msg.text;
+    log.style.color  = msg.ok ? 'var(--green)' : 'var(--red)';
+  }
+  if (msg.type === 'cmdRef') {
+    document.getElementById('cmdRef').innerHTML = msg.html;
+  }
+  if (msg.type === 'copied') {
+    const log = document.getElementById('depLog');
+    log.textContent = '📋 Copied to clipboard.';
+    log.style.color = 'var(--cyan)';
+  }
+});
+
+// Build dep blocks immediately if deps page is active on load
+if (document.getElementById('deps').classList.contains('active')) buildDepBlocks();
+</script>
+</body>
+</html>`;
   :root {
     --bg: #0d0d1a; --bg2: #111827; --border: #1e3a5f;
     --cyan: #00e5ff; --blue: #0057a8; --blue2: #00b4d8;
