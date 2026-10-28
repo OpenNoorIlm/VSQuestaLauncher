@@ -2,7 +2,7 @@
   "name": "questa-launcher",
   "displayName": "Questa Launcher",
   "description": "Run Questa simulations on SystemVerilog files with priority ordering and conf.svconf support",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "publisher": "bismillah",
   "engines": { "vscode": "^1.80.0" },
   "repository": { "type": "git", "url": "https://github.com/bismillah/questa-launcher" },

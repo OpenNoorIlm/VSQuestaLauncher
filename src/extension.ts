@@ -708,7 +708,7 @@ function buildHelpPanel(
   </svg>
   <div>
     <h1>${title}</h1>
-    <p>VSQuestaLauncher v1.8 — SystemVerilog simulation for VS Code</p>
+    <p>VSQuestaLauncher v1.9 — SystemVerilog simulation for VS Code</p>
   </div>
 </div>
 
