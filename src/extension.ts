@@ -225,6 +225,9 @@ function resolveEnv(cfg: vscode.WorkspaceConfiguration): NodeJS.ProcessEnv {
   env['MTI_VCO_MODE'] = '64';
   env['QSIM_VCO_MODE'] = '64';
 
+  // DISPLAY — required for Questa GUI on Linux; inherit from VS Code process or default to :0
+  if (!env['DISPLAY']) env['DISPLAY'] = ':0';
+
   // SALT_LICENSE_SERVER — Questa FSE/Starter edition (highest priority)
   const saltLic = cfg.get<string>('saltLicenseServer')
     || process.env['SALT_LICENSE_SERVER']
@@ -1030,16 +1033,38 @@ async function runQuestaGui(uri?: vscode.Uri): Promise<void> {
   channel.appendLine(`  run.do: ${runDoPath}`);
   channel.appendLine('─'.repeat(60));
 
-  // Launch WITHOUT -c so the GUI opens; detached so it outlives VS Code
+  // Launch WITHOUT -c so the GUI opens.
+  // Pass run.do by absolute path — avoids inline TCL semicolon parsing issues.
+  // stdio: pipe stderr so errors appear in the Output channel instead of vanishing silently.
   const proc = child_process.spawn(
     questa,
-    ['-do', `cd ${dir}; do run.do`],
-    { cwd: dir, env, detached: true, stdio: 'ignore' }
+    ['-do', runDoPath],
+    { cwd: dir, env, detached: true, stdio: ['ignore', 'ignore', 'pipe'] }
   );
+
+  proc.stderr.on('data', (d: Buffer) => {
+    const txt = d.toString();
+    channel.append(txt);
+  });
+
+  proc.on('error', (err: NodeJS.ErrnoException) => {
+    channel.appendLine(`✗ Failed to launch Questa GUI: ${err.message}`);
+    if (err.code === 'ENOENT') {
+      channel.appendLine(`  → vsim not found at: ${questa}`);
+      channel.appendLine(`  → Set the correct path via the ⚙ Set Questa Path button.`);
+    }
+    vscode.window.showErrorMessage(
+      `Cannot launch Questa GUI: ${err.message}. Use ⚙ Set Questa Path to fix.`,
+      'Set Questa Path'
+    ).then(sel => { if (sel) vscode.commands.executeCommand('questaLauncher.setQuestaPath'); });
+  });
+
   proc.unref();
 
   vscode.window.showInformationMessage(`🖥 Questa GUI launched for ${topModule2} — waveforms loading automatically.`);
   channel.appendLine(`✓ Questa GUI launched (PID detached). Close the Questa window when done.`);
+  channel.appendLine(`  DISPLAY: ${env['DISPLAY'] || '(not set)'}`);
+  channel.appendLine(`  vsim:    ${questa}`);
 }
 
 
@@ -1089,19 +1114,137 @@ async function showWaveform(uri?: vscode.Uri): Promise<void> {
   channel.appendLine(`  vsim:   ${questa}`);
   channel.appendLine('─'.repeat(60));
 
-  // Launch Questa GUI to view the existing WLF — detached so it outlives VS Code
-  // vsim -view <wlf> loads the simulation log without re-running; -do adds the wave signals
+  // Launch Questa GUI to view the existing WLF.
+  // -view <wlf>  loads the saved simulation log (no re-run)
+  // -do <wave.do> executes add wave -r /* + wave zoom full after loading
   const proc = child_process.spawn(
     questa,
     ['-view', wlfPath, '-do', waveDo],
-    { cwd: dir, env, detached: true, stdio: 'ignore' }
+    { cwd: dir, env, detached: true, stdio: ['ignore', 'ignore', 'pipe'] }
   );
+
+  proc.stderr.on('data', (d: Buffer) => channel.append(d.toString()));
+
+  proc.on('error', (err: NodeJS.ErrnoException) => {
+    channel.appendLine(`✗ Failed to launch WaveForm viewer: ${err.message}`);
+    if (err.code === 'ENOENT') {
+      channel.appendLine(`  → vsim not found at: ${questa}`);
+      channel.appendLine(`  → Use ⚙ Set Questa Path to fix.`);
+    }
+    vscode.window.showErrorMessage(
+      `Cannot open WaveForm: ${err.message}`,
+      'Set Questa Path'
+    ).then(sel => { if (sel) vscode.commands.executeCommand('questaLauncher.setQuestaPath'); });
+  });
+
   proc.unref();
 
   vscode.window.showInformationMessage(`〰 WaveForm viewer opened — loading vsim.wlf`);
   channel.appendLine(`✓ Questa WaveForm viewer launched (PID detached).`);
+  channel.appendLine(`  DISPLAY: ${env['DISPLAY'] || '(not set)'}`);
+  channel.appendLine(`  vsim:    ${questa}`);
 }
 
+
+
+// ─── Set Questa path ──────────────────────────────────────────────────────
+
+async function setQuestaPath(): Promise<void> {
+  const cfg = vscode.workspace.getConfiguration('questaLauncher');
+  const current = cfg.get<string>('questaBin') || '';
+
+  // Show current resolved path for context
+  const resolved = resolveQuesta(cfg);
+
+  const choice = await vscode.window.showQuickPick([
+    {
+      label: '$(folder-opened)  Browse for vsim binary or its folder…',
+      detail: 'Opens a file picker — select the vsim binary or its parent folder',
+      id: 'browse'
+    },
+    {
+      label: '$(edit)  Type path manually',
+      detail: current ? `Current: ${current}` : 'No path set — will type the bin directory',
+      id: 'type'
+    },
+    {
+      label: '$(search)  Auto-detect from PATH',
+      detail: 'Runs `which vsim` and saves the detected directory',
+      id: 'auto'
+    },
+    {
+      label: '$(info)  Show current resolved path',
+      detail: resolved,
+      id: 'show'
+    }
+  ], {
+    title: '⚙ Set Questa Binary Path',
+    placeHolder: current || 'No questaBin set — type, browse, or auto-detect'
+  }) as { label: string; detail: string; id: string } | undefined;
+
+  if (!choice) return;
+
+  if (choice.id === 'browse') {
+    const uris = await vscode.window.showOpenDialog({
+      title: 'Select vsim binary or its folder',
+      canSelectFiles: true,
+      canSelectFolders: true,
+      canSelectMany: false,
+      openLabel: 'Use this vsim / folder'
+    });
+    if (!uris || !uris[0]) return;
+    const selected = uris[0].fsPath;
+    const stat = fs.statSync(selected);
+    const binDir = stat.isDirectory() ? selected : path.dirname(selected);
+    await cfg.update('questaBin', binDir, vscode.ConfigurationTarget.Global);
+    vscode.window.showInformationMessage(`✓ Questa bin path set to: ${binDir}`);
+    return;
+  }
+
+  if (choice.id === 'type') {
+    const input = await vscode.window.showInputBox({
+      title: '⚙ Questa Bin Directory',
+      prompt: 'Full path to the Questa linux_x86_64 (or win64) bin directory',
+      placeHolder: '/home/user/altera/25.1std/questa_fse/linux_x86_64',
+      value: current,
+      validateInput: val => {
+        if (!val.trim()) return 'Path cannot be empty';
+        const vsimPath = path.join(val.trim(), 'vsim');
+        if (!fs.existsSync(vsimPath) && !fs.existsSync(vsimPath + '.exe')) {
+          return `⚠ vsim not found in "${val}" — double-check the path (saved anyway)`;
+        }
+        return undefined;
+      }
+    });
+    if (input === undefined) return;
+    await cfg.update('questaBin', input.trim(), vscode.ConfigurationTarget.Global);
+    vscode.window.showInformationMessage(`✓ Questa bin path set to: ${input.trim()}`);
+    return;
+  }
+
+  if (choice.id === 'auto') {
+    try {
+      const found = child_process.execSync('which vsim 2>/dev/null').toString().trim();
+      if (found) {
+        const binDir = path.dirname(found);
+        await cfg.update('questaBin', binDir, vscode.ConfigurationTarget.Global);
+        vscode.window.showInformationMessage(`✓ Auto-detected Questa bin: ${binDir}`);
+      } else {
+        vscode.window.showWarningMessage(
+          'vsim not found on PATH. Install Questa FSE or set the path manually.',
+          'Type Path'
+        ).then(sel => { if (sel) vscode.commands.executeCommand('questaLauncher.setQuestaPath'); });
+      }
+    } catch {
+      vscode.window.showWarningMessage('Could not run `which vsim`. Set the path manually.');
+    }
+    return;
+  }
+
+  if (choice.id === 'show') {
+    vscode.window.showInformationMessage(`Questa bin: ${resolved}`);
+  }
+}
 
 
 async function setLicense(): Promise<void> {
@@ -1228,12 +1371,13 @@ async function setPriority(uri?: vscode.Uri): Promise<void> {
 
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
-    vscode.commands.registerCommand('questaLauncher.run',           runCli),
-    vscode.commands.registerCommand('questaLauncher.runGui',        runQuestaGui),
-    vscode.commands.registerCommand('questaLauncher.showWaveform',  showWaveform),
-    vscode.commands.registerCommand('questaLauncher.editConf',      editConf),
-    vscode.commands.registerCommand('questaLauncher.setPriority',   setPriority),
-    vscode.commands.registerCommand('questaLauncher.setLicense',    setLicense),
+    vscode.commands.registerCommand('questaLauncher.run',            runCli),
+    vscode.commands.registerCommand('questaLauncher.runGui',         runQuestaGui),
+    vscode.commands.registerCommand('questaLauncher.showWaveform',   showWaveform),
+    vscode.commands.registerCommand('questaLauncher.setQuestaPath',  setQuestaPath),
+    vscode.commands.registerCommand('questaLauncher.editConf',       editConf),
+    vscode.commands.registerCommand('questaLauncher.setPriority',    setPriority),
+    vscode.commands.registerCommand('questaLauncher.setLicense',     setLicense),
     vscode.commands.registerCommand('questaLauncher.helpDocs', () => showHelpDocs(context)),
     vscode.commands.registerCommand('questaLauncher.helpDeps', () => showHelpDeps(context))
   );
