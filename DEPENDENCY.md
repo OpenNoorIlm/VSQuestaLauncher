@@ -1,39 +1,49 @@
 # Questa Launcher — Dependencies
 
-This document lists everything required to build, install, and run the Questa Launcher VS Code extension.
+Everything required to **build**, **install**, and **run** the Questa Launcher extension.
+Use the **📦 Dependencies** tab to install these interactively — each section has a **▶ Run All** button
+that walks you through every command one-by-one with per-step approval.
 
 ---
 
-## Runtime Dependencies (to run simulations)
+## Questa FSE (Runtime — required to simulate)
 
 | Dependency | Version | Purpose |
 |---|---|---|
 | **Questa Altera FSE** | 2025.1 / 2025.2 | The simulator itself (`vsim`, `vlog`, `vopt`) |
 | **Questa License** | — | `.dat` file from Intel/Altera — set via `SALT_LICENSE_SERVER` |
-| **Node.js** | ≥ 18.x | VS Code extension host runtime |
-| **VS Code** or **VS Code Insiders** | ≥ 1.80.0 | Editor |
+
+### How to install Questa FSE
+Go to the **📦 Dependencies** tab → **📦 Install** section → click **▶ Run All** (or run each step individually).
+Steps covered: download page → make installer executable → run installer → set PATH + license → verify.
 
 ---
 
-## Build / Package Dependencies (to rebuild the `.vsix`)
+## VS Code / VS Code Insiders (Runtime — required to use the extension)
 
 | Dependency | Version | Purpose |
 |---|---|---|
-| **Node.js** | ≥ 18.x | JavaScript runtime for build tools |
+| **VS Code** or **VS Code Insiders** | ≥ 1.80.0 | Editor host |
+
+### How to install VS Code Insiders
+Go to the **📦 Dependencies** tab → **🖥 GUI** section → click **▶ Run** for your OS.
+
+---
+
+## Build Dependencies (only needed to recompile the `.vsix`)
+
+| Dependency | Version | Purpose |
+|---|---|---|
+| **Node.js** | ≥ 18.x | Runtime for build tools |
 | **npm** | ≥ 9.x | Package manager |
 | **TypeScript** | ≥ 5.0 | Compiles `src/extension.ts` → `out/extension.js` |
 | **@types/vscode** | ≥ 1.80.0 | VS Code API type definitions |
 | **@types/node** | ≥ 20.x | Node.js type definitions |
-| **@vscode/vsce** | ≥ 2.x | VS Code Extension packager (produces `.vsix`) |
+| **@vscode/vsce** | ≥ 2.x | Packages the extension into a `.vsix` |
 
----
-
-## Optional (Linux only — for icon conversion)
-
-| Dependency | Purpose |
-|---|---|
-| **librsvg2-bin** (`rsvg-convert`) | Converts `questa_launcher.svg` → `icon.png` |
-| **imagemagick** (`convert`) | Alternative SVG/PNG conversion |
+### How to build
+Go to the **📦 Dependencies** tab → **🔨 Build** section → click **▶ Run All**.
+Steps covered: install Node.js → TypeScript + vsce → project deps → compile → package → install.
 
 ---
 
@@ -51,7 +61,7 @@ This document lists everything required to build, install, and run the Questa La
 
 ---
 
-## Environment Variables Set by the Extension
+## Environment Variables (set automatically by the extension)
 
 | Variable | Purpose |
 |---|---|
@@ -62,3 +72,12 @@ This document lists everything required to build, install, and run the Questa La
 | `MTI_VCO_MODE` | Set to `64` (64-bit mode) |
 | `QSIM_VCO_MODE` | Set to `64` (replaces MTI_VCO_MODE) |
 | `PATH` | Extended with Questa bin directory |
+
+---
+
+## Optional (Linux only)
+
+| Dependency | Purpose |
+|---|---|
+| **librsvg2-bin** (`rsvg-convert`) | Converts `questa_launcher.svg` → `icon.png` |
+| **imagemagick** (`convert`) | Alternative SVG/PNG conversion |
