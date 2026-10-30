@@ -1,0 +1,27 @@
+[
+  {
+    "name": "clk",
+    "direction": "input",
+    "width": ""
+  },
+  {
+    "name": "din",
+    "direction": "input",
+    "width": "[W-1:0]"
+  },
+  {
+    "name": "cnt",
+    "direction": "output",
+    "width": "[3:0]"
+  },
+  {
+    "name": "sda",
+    "direction": "inout",
+    "width": ""
+  },
+  {
+    "name": "done",
+    "direction": "output",
+    "width": ""
+  }
+]

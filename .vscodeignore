@@ -1,0 +1,10 @@
+# Files excluded from the packaged .vsix (everything else is included).
+.git/**
+.gitignore
+.vscode/**
+node_modules/**
+package-lock.json
+tsconfig.json
+*.vsix
+verify/**
+docs/**

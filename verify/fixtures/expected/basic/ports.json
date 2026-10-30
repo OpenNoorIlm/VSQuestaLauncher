@@ -1,0 +1,17 @@
+[
+  {
+    "name": "clk",
+    "direction": "input",
+    "width": ""
+  },
+  {
+    "name": "sw",
+    "direction": "input",
+    "width": "[3:0]"
+  },
+  {
+    "name": "led",
+    "direction": "output",
+    "width": ""
+  }
+]

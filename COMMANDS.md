@@ -1,8 +1,52 @@
-# Questa Launcher — Commands Reference
+# MultiHD Launcher — Commands Reference
 
-Each section groups related commands. In the **Dependency Resolver** panel every block has
-**📋 Copy** and **▶ Run** buttons. Each section also has a **▶ Run All** button that steps through
-every command one-by-one — each requiring your explicit approval before it runs.
+MultiHD Launcher (formerly *Questa Launcher*) contributes the following commands. All are
+available from the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`); most also appear on the
+`.sv` editor title bar and/or the Explorer context menu.
+
+| Command | ID |
+|---|---|
+| 🚀 Open MultiHD Launcher | `multihdLauncher.openLauncher` |
+| ▶ Run CLI | `multihdLauncher.run` |
+| 🖥 Run GUI | `multihdLauncher.runGui` |
+| 〰 Show WaveForm | `multihdLauncher.showWaveform` |
+| ⬡ Launch Questa | `multihdLauncher.launchQuesta` |
+| ◈ Launch Quartus Prime | `multihdLauncher.launchQuartus` |
+| ◆ Launch Gowin EDA | `multihdLauncher.launchGowin` |
+| ⚙ Configuration | `multihdLauncher.setConfig` |
+| 🔑 Set License | `multihdLauncher.setLicense` |
+| ⇅ Compile Order | `multihdLauncher.setPriority` |
+| ✕ Exclude Files | `multihdLauncher.excludeFiles` |
+| 📦 Library Manager | `multihdLauncher.libraryManager` |
+| ◆ Gowin CST Editor | `multihdLauncher.gowinCst` |
+| ⬇ Install / License Helpers | `multihdLauncher.installHelpers` |
+| ⚙ Edit conf.svconf | `multihdLauncher.editConf` |
+| ❓ MultiHD Launcher Help | `multihdLauncher.helpDocs` |
+| 📦 Dependency Resolver | `multihdLauncher.helpDeps` |
+
+## Archival: legacy `questaLauncher.*` aliases
+
+The v1.x IDs below are kept alive as hidden runtime aliases that map to the command IDs above;
+they are not declared in the manifest. Existing keybindings, tasks and settings keep working.
+
+| Legacy alias (v1.x) | Maps to |
+|---|---|
+| `questaLauncher.run` | `multihdLauncher.run` |
+| `questaLauncher.runGui` | `multihdLauncher.runGui` |
+| `questaLauncher.showWaveform` | `multihdLauncher.showWaveform` |
+| `questaLauncher.setQuestaPath` | `multihdLauncher.setConfig` |
+| `questaLauncher.setConfig` | `multihdLauncher.setConfig` |
+| `questaLauncher.setLicense` | `multihdLauncher.setLicense` |
+| `questaLauncher.setPriority` | `multihdLauncher.setPriority` |
+| `questaLauncher.editConf` | `multihdLauncher.editConf` |
+| `questaLauncher.helpDocs` | `multihdLauncher.helpDocs` |
+| `questaLauncher.helpDeps` | `multihdLauncher.helpDeps` |
+
+---
+
+In the **Dependency Resolver** panel every block below has **📋 Copy** and **▶ Run** buttons.
+Each section also has a **▶ Run All** button that steps through every command one-by-one —
+each command requires your explicit approval before it runs.
 
 ---
 
@@ -32,7 +76,7 @@ npm install -g typescript @vscode/vsce
 ```
 
 ### Build — Linux — 4. Enter the project folder
-Changes into the VSQuestaLauncher source directory.
+Changes into the MultiHD Launcher (VSQuestaLauncher) source directory.
 
 ```bash
 cd ~/Downloads/VSQuestaLauncher
@@ -53,17 +97,17 @@ npm run compile
 ```
 
 ### Build — Linux — 7. Package extension as .vsix
-Bundles the compiled extension into an installable questa-launcher-X.Y.Z.vsix file.
+Bundles the compiled extension into an installable multihd-launcher-2.0.0.vsix file.
 
 ```bash
 npx @vscode/vsce package --no-dependencies
 ```
 
 ### Build — Linux — 8. Install into VS Code Insiders
-Installs the freshly built .vsix into VS Code Insiders.
+Installs the freshly built multihd-launcher-2.0.0.vsix into VS Code Insiders.
 
 ```bash
-code-insiders --install-extension questa-launcher-1.8.0.vsix
+code-insiders --install-extension multihd-launcher-2.0.0.vsix --force
 ```
 
 ### Build — Windows — 1. Install Node.js LTS via winget
@@ -89,7 +133,7 @@ npm install -g typescript @vscode/vsce
 ```
 
 ### Build — Windows — 4. Enter the project folder
-Changes into the VSQuestaLauncher source directory.
+Changes into the MultiHD Launcher (VSQuestaLauncher) source directory.
 
 ```powershell
 cd "$env:USERPROFILE\Downloads\VSQuestaLauncher"
@@ -110,17 +154,17 @@ npm run compile
 ```
 
 ### Build — Windows — 7. Package extension as .vsix
-Bundles the compiled extension into an installable questa-launcher-X.Y.Z.vsix file.
+Bundles the compiled extension into an installable multihd-launcher-2.0.0.vsix file.
 
 ```powershell
 npx vsce package --no-dependencies
 ```
 
 ### Build — Windows — 8. Install into VS Code Insiders
-Installs the freshly built .vsix into VS Code Insiders.
+Installs the freshly built multihd-launcher-2.0.0.vsix into VS Code Insiders.
 
 ```powershell
-code-insiders --install-extension questa-launcher-1.8.0.vsix
+code-insiders --install-extension multihd-launcher-2.0.0.vsix --force
 ```
 
 ---
@@ -131,7 +175,7 @@ code-insiders --install-extension questa-launcher-1.8.0.vsix
 Opens the Intel FPGA software portal in your default browser (requires a free Intel account).
 
 ```bash
-xdg-open "https://www.intel.com/content/www/us/en/software/programmable/quartus-prime/questa-edition.html"
+xdg-open "https://www.intel.com/content/www/us/en/software-kit/825277/questa-intel-fpgas-standard-edition-software-version-23-1-1.html"
 ```
 
 ### Install — Linux — 2. Make installer executable
@@ -176,7 +220,7 @@ vsim -version
 Opens the Intel FPGA software portal in your default browser.
 
 ```powershell
-Start-Process "https://www.intel.com/content/www/us/en/software/programmable/quartus-prime/questa-edition.html"
+Start-Process "https://www.intel.com/content/www/us/en/software-kit/825277/questa-intel-fpgas-standard-edition-software-version-23-1-1.html"
 ```
 
 ### Install — Windows — 2. Run the Questa installer
@@ -220,33 +264,33 @@ vsim -version
 ## CLI
 
 ### CLI — Linux — Uninstall extension
-Removes the Questa Launcher extension from VS Code Insiders.
+Removes the MultiHD Launcher extension from VS Code Insiders (uninstall the legacy bismillah.questa-launcher package too if it is still installed).
 
 ```bash
-code-insiders --uninstall-extension bismillah.questa-launcher
+code-insiders --uninstall-extension bismillah.multihd-launcher
 ```
 
 ### CLI — Linux — Reinstall extension
-Uninstalls the old version then installs the latest .vsix in one step.
+Uninstalls the old version then installs the latest multihd-launcher-2.0.0.vsix in one step.
 
 ```bash
-code-insiders --uninstall-extension bismillah.questa-launcher
-code-insiders --install-extension ~/Downloads/VSQuestaLauncher/questa-launcher-1.8.0.vsix
+code-insiders --uninstall-extension bismillah.multihd-launcher
+code-insiders --install-extension ~/Downloads/VSQuestaLauncher/multihd-launcher-2.0.0.vsix --force
 ```
 
 ### CLI — Windows — Uninstall extension
-Removes the Questa Launcher extension from VS Code Insiders.
+Removes the MultiHD Launcher extension from VS Code Insiders (uninstall the legacy bismillah.questa-launcher package too if it is still installed).
 
 ```powershell
-code-insiders --uninstall-extension bismillah.questa-launcher
+code-insiders --uninstall-extension bismillah.multihd-launcher
 ```
 
 ### CLI — Windows — Reinstall extension
-Uninstalls the old version then installs the latest .vsix in one step.
+Uninstalls the old version then installs the latest multihd-launcher-2.0.0.vsix in one step.
 
 ```powershell
-code-insiders --uninstall-extension bismillah.questa-launcher
-code-insiders --install-extension "$env:USERPROFILE\Downloads\VSQuestaLauncher\questa-launcher-1.8.0.vsix"
+code-insiders --uninstall-extension bismillah.multihd-launcher
+code-insiders --install-extension "$env:USERPROFILE\Downloads\VSQuestaLauncher\multihd-launcher-2.0.0.vsix" --force
 ```
 
 ---

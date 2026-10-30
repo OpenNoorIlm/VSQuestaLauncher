@@ -1,8 +1,9 @@
-# Questa Launcher — Dependencies
+# MultiHD Launcher — Dependencies
 
-Everything required to **build**, **install**, and **run** the Questa Launcher extension.
-Use the **📦 Dependencies** tab to install these interactively — each section has a **▶ Run All** button
-that walks you through every command one-by-one with per-step approval.
+Everything required to **build**, **install**, and **run** the MultiHD Launcher
+(formerly *Questa Launcher*) VS Code extension. Use the **📦 Dependency Resolver** panel to
+install these interactively — each section has a **▶ Run All** button that walks you through
+every command one-by-one with per-step approval.
 
 ---
 
@@ -13,9 +14,49 @@ that walks you through every command one-by-one with per-step approval.
 | **Questa Altera FSE** | 2025.1 / 2025.2 | The simulator itself (`vsim`, `vlog`, `vopt`) |
 | **Questa License** | — | `.dat` file from Intel/Altera — set via `SALT_LICENSE_SERVER` |
 
+Configure the `vsim` binary in **⚙ Configuration** (`multihdLauncher.vsimPath`), or leave it
+empty to auto-detect from `multihdLauncher.questaBin`, `PATH` or the known install location.
+
 ### How to install Questa FSE
-Go to the **📦 Dependencies** tab → **📦 Install** section → click **▶ Run All** (or run each step individually).
-Steps covered: download page → make installer executable → run installer → set PATH + license → verify.
+Go to the **📦 Dependency Resolver** panel → **📦 Install** section → click **▶ Run All**
+(or run each step individually). Steps covered: download page → make installer executable →
+run installer → set PATH + license → verify.
+
+- Download: [Intel Questa FSE software kit](https://www.intel.com/content/www/us/en/software-kit/825277/questa-intel-fpgas-standard-edition-software-version-23-1-1.html)
+- Free license: [Intel PSG license portal](https://licensing.intel.com/psg/s/sales-signup-evaluationlicenses)
+
+---
+
+## Quartus Prime (Runtime — required for Quartus synthesis)
+
+| Dependency | Version | Purpose |
+|---|---|---|
+| **Quartus Prime** | 23.1+ (Lite/Standard/Pro) | Opens the generated `.qpf` project |
+| **Quartus binary** | — | `quartus` on `PATH` or configured in **⚙ Configuration → Quartus binary** |
+
+The extension generates `<project>.qpf`, `<project>.qsf` and `<project>.sdc` (timing
+template, written only when missing) and creates `output_files/`. If a Quartus binary is
+configured (`multihdLauncher.quartusPath`) or found on `PATH`, the generated project is
+opened automatically — otherwise the files are written and a warning is logged.
+
+Install Quartus Prime from the [Intel FPGA downloads](https://www.intel.com/content/www/us/en/software/programmable/quartus-prime/download.html)
+page. The free Lite edition needs no license.
+
+---
+
+## Gowin EDA (Runtime — required for Gowin synthesis)
+
+| Dependency | Version | Purpose |
+|---|---|---|
+| **Gowin EDA** | 1.9.x+ | Opens the generated `.gprj` project |
+| **Gowin binary** | — | `gw_ide` on `PATH` or configured in **⚙ Configuration → Gowin IDE binary** |
+
+The extension generates `<project>.gprj`, `<project>.f` and an interactive `<project>.cst`
+pin-assignment file, and creates `impl/pnr/`. If a Gowin binary is configured
+(`multihdLauncher.gowinPath`) or found on `PATH`, the generated project is opened
+automatically — otherwise the files are written and a warning is logged.
+
+Install Gowin EDA from the [Gowin EDA downloads](https://www.gowinsemi.com/en/support/download_eda/) page.
 
 ---
 
@@ -26,7 +67,7 @@ Steps covered: download page → make installer executable → run installer →
 | **VS Code** or **VS Code Insiders** | ≥ 1.80.0 | Editor host |
 
 ### How to install VS Code Insiders
-Go to the **📦 Dependencies** tab → **🖥 GUI** section → click **▶ Run** for your OS.
+Go to the **📦 Dependency Resolver** panel → **🖥 GUI** section → click **▶ Run** for your OS.
 
 ---
 
@@ -36,14 +77,15 @@ Go to the **📦 Dependencies** tab → **🖥 GUI** section → click **▶ Run
 |---|---|---|
 | **Node.js** | ≥ 18.x | Runtime for build tools |
 | **npm** | ≥ 9.x | Package manager |
-| **TypeScript** | ≥ 5.0 | Compiles `src/extension.ts` → `out/extension.js` |
+| **TypeScript** | ≥ 5.0 | Compiles `src/**/*.ts` → `out/**/*.js` |
 | **@types/vscode** | ≥ 1.80.0 | VS Code API type definitions |
 | **@types/node** | ≥ 20.x | Node.js type definitions |
-| **@vscode/vsce** | ≥ 2.x | Packages the extension into a `.vsix` |
+| **@vscode/vsce** | ≥ 2.x | Packages the extension into `multihd-launcher-2.0.0.vsix` |
 
 ### How to build
-Go to the **📦 Dependencies** tab → **🔨 Build** section → click **▶ Run All**.
-Steps covered: install Node.js → TypeScript + vsce → project deps → compile → package → install.
+Go to the **📦 Dependency Resolver** panel → **🔨 Build** section → click **▶ Run All**.
+Steps covered: install Node.js → TypeScript + vsce → project dev-deps → compile → package
+`multihd-launcher-2.0.0.vsix` → install. Full commands: [COMMANDS.md](COMMANDS.md).
 
 ---
 
@@ -65,13 +107,24 @@ Steps covered: install Node.js → TypeScript + vsce → project deps → compil
 
 | Variable | Purpose |
 |---|---|
-| `SALT_LICENSE_SERVER` | Questa FSE license file path |
-| `LM_LICENSE_FILE` | General FlexLM license |
+| `SALT_LICENSE_SERVER` | Questa FSE license file path (or `port@host`); falls back to the license file |
+| `LM_LICENSE_FILE` | General FlexLM license — set from the configured license file |
 | `MGLS_LICENSE_FILE` | Questa/Siemens license server |
 | `ALTERAD_LICENSE_FILE` | Altera/Intel FPGA license |
-| `MTI_VCO_MODE` | Set to `64` (64-bit mode) |
-| `QSIM_VCO_MODE` | Set to `64` (replaces MTI_VCO_MODE) |
-| `PATH` | Extended with Questa bin directory |
+| `MTI_VCO_MODE` | 64-bit simulator mode (default `64`) |
+| `QSIM_VCO_MODE` | Set to `64` (newer Questa releases) |
+| `DISPLAY` | Inherited (or `:0`) so the Questa GUI can open on Linux |
+| `PATH` | Extended with the configured Questa / Quartus / Gowin bin directories |
+
+---
+
+## License guard
+
+Questa launches are blocked when `multihdLauncher.licenseFile` is empty or the file does not
+exist at that path. The launcher panel shows `⚠ LICENSE NOT SET — configure before launching
+Questa!` and the launch logs
+`✗ [Questa] BLOCKED: License file not configured or not found!`, offering to open
+**⚙ Configuration**. Quartus Prime and Gowin EDA launches are unaffected by the license guard.
 
 ---
 
@@ -79,5 +132,12 @@ Steps covered: install Node.js → TypeScript + vsce → project deps → compil
 
 | Dependency | Purpose |
 |---|---|
-| **librsvg2-bin** (`rsvg-convert`) | Converts `questa_launcher.svg` → `icon.png` |
-| **imagemagick** (`convert`) | Alternative SVG/PNG conversion |
+| **librsvg2-bin** (`rsvg-convert`) | Converts `images/multihd_launcher.svg` → `images/icon.png` (256×256) |
+| **imagemagick** (`convert`, `magick`) | Alternative SVG/PNG conversion |
+
+---
+
+## No internet connection required
+
+MultiHD Launcher does **not** make any network requests at runtime. The **⬇ INSTALL QUESTA**
+and **🔑 LICENSE REQUEST** buttons simply open URLs in your default browser.

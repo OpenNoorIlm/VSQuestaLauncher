@@ -1,12 +1,16 @@
 {
-  "name": "questa-launcher",
-  "displayName": "Questa Launcher",
-  "description": "Run Questa simulations on SystemVerilog files with priority ordering and conf.svconf support",
-  "version": "1.9.1",
+  "name": "multihd-launcher",
+  "displayName": "MultiHD Launcher",
+  "description": "Multi-HDL launcher for Questa FSE, Quartus Prime and Gowin EDA — generated project files, compile order, per-file exclusion, library manager and one-click launch inside VS Code.",
+  "version": "2.0.0",
   "publisher": "bismillah",
+  "license": "MIT",
   "engines": { "vscode": "^1.80.0" },
-  "repository": { "type": "git", "url": "https://github.com/bismillah/questa-launcher" },
+  "icon": "images/icon.png",
+  "galleryBanner": { "color": "#0d0d1a", "theme": "dark" },
+  "repository": { "type": "git", "url": "https://github.com/OpenNoorIlm/VSQuestaLauncher" },
   "categories": ["Other"],
+  "keywords": ["questa", "modelsim", "quartus", "gowin", "systemverilog", "verilog", "fpga", "simulation", "hdl"],
   "activationEvents": [
     "onLanguage:systemverilog",
     "workspaceContains:**/*.sv",
@@ -15,43 +19,59 @@
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
-      { "command": "questaLauncher.run",           "title": "▶ Run CLI",          "icon": "$(play)" },
-      { "command": "questaLauncher.runGui",         "title": "🖥 Run GUI",          "icon": "$(device-desktop)" },
-      { "command": "questaLauncher.showWaveform",   "title": "〰 Show WaveForm",    "icon": "$(symbol-event)" },
-      { "command": "questaLauncher.setQuestaPath",  "title": "⚙ Set Questa Path",  "icon": "$(settings-gear)" },
-      { "command": "questaLauncher.editConf", "title": "⚙ Edit conf.svconf", "icon": "$(settings-gear)" },
-      { "command": "questaLauncher.setPriority", "title": "⇅ Set Compile Priority", "icon": "$(list-ordered)" },
-      { "command": "questaLauncher.setLicense", "title": "🔑 Set License", "icon": "$(key)" },
-      { "command": "questaLauncher.helpDocs", "title": "❓ VSQuestaLauncher Help", "icon": "$(question)" },
-      { "command": "questaLauncher.helpDeps", "title": "📦 Dependency Resolver", "icon": "$(package)" }
+      { "command": "multihdLauncher.openLauncher",    "title": "🚀 Open MultiHD Launcher",       "icon": "$(rocket)" },
+      { "command": "multihdLauncher.run",             "title": "▶ Run CLI",                     "icon": "$(play)" },
+      { "command": "multihdLauncher.runGui",          "title": "🖥 Run GUI",                     "icon": "$(device-desktop)" },
+      { "command": "multihdLauncher.showWaveform",    "title": "〰 Show WaveForm",               "icon": "$(symbol-event)" },
+      { "command": "multihdLauncher.launchQuesta",    "title": "⬡ Launch Questa",               "icon": "$(beaker)" },
+      { "command": "multihdLauncher.launchQuartus",   "title": "◈ Launch Quartus Prime",        "icon": "$(circuit-board)" },
+      { "command": "multihdLauncher.launchGowin",     "title": "◆ Launch Gowin EDA",            "icon": "$(symbol-array)" },
+      { "command": "multihdLauncher.setConfig",       "title": "⚙ Configuration",              "icon": "$(settings-gear)" },
+      { "command": "multihdLauncher.setLicense",      "title": "🔑 Set License",                "icon": "$(key)" },
+      { "command": "multihdLauncher.setPriority",     "title": "⇅ Compile Order",               "icon": "$(list-ordered)" },
+      { "command": "multihdLauncher.excludeFiles",    "title": "✕ Exclude Files",               "icon": "$(close)" },
+      { "command": "multihdLauncher.libraryManager",  "title": "📦 Library Manager",            "icon": "$(library)" },
+      { "command": "multihdLauncher.gowinCst",        "title": "◆ Gowin CST Editor",            "icon": "$(files)" },
+      { "command": "multihdLauncher.installHelpers",  "title": "⬇ Install / License Helpers",   "icon": "$(desktop-download)" },
+      { "command": "multihdLauncher.editConf",        "title": "⚙ Edit conf.svconf",            "icon": "$(settings-gear)" },
+      { "command": "multihdLauncher.helpDocs",        "title": "❓ MultiHD Launcher Help",      "icon": "$(question)" },
+      { "command": "multihdLauncher.helpDeps",        "title": "📦 Dependency Resolver",        "icon": "$(package)" }
     ],
     "menus": {
       "editor/title": [
-        { "command": "questaLauncher.run",           "when": "resourceExtname == .sv", "group": "navigation@1" },
-        { "command": "questaLauncher.runGui",         "when": "resourceExtname == .sv", "group": "navigation@2" },
-        { "command": "questaLauncher.showWaveform",   "when": "resourceExtname == .sv", "group": "navigation@3" },
-        { "command": "questaLauncher.setQuestaPath",  "when": "resourceExtname == .sv", "group": "navigation@4" },
-        { "command": "questaLauncher.setLicense",     "when": "resourceExtname == .sv", "group": "navigation@5" },
-        { "command": "questaLauncher.setPriority",    "when": "resourceExtname == .sv", "group": "navigation@6" },
-        { "command": "questaLauncher.editConf",       "when": "resourceExtname == .sv", "group": "navigation@7" },
-        { "command": "questaLauncher.helpDocs",       "when": "resourceExtname == .sv", "group": "navigation@8" },
-        { "command": "questaLauncher.helpDeps",       "when": "resourceExtname == .sv", "group": "navigation@9" },
-        { "command": "questaLauncher.setLicense",     "when": "resourceFilename == conf.svconf", "group": "navigation@1" },
-        { "command": "questaLauncher.editConf",       "when": "resourceFilename == conf.svconf", "group": "navigation@2" },
-        { "command": "questaLauncher.helpDocs",       "when": "resourceFilename == conf.svconf", "group": "navigation@3" }
+        { "command": "multihdLauncher.openLauncher",   "when": "resourceExtname == .sv", "group": "navigation@0" },
+        { "command": "multihdLauncher.run",            "when": "resourceExtname == .sv", "group": "navigation@1" },
+        { "command": "multihdLauncher.runGui",         "when": "resourceExtname == .sv", "group": "navigation@2" },
+        { "command": "multihdLauncher.showWaveform",   "when": "resourceExtname == .sv", "group": "navigation@3" },
+        { "command": "multihdLauncher.launchQuesta",   "when": "resourceExtname == .sv", "group": "navigation@4" },
+        { "command": "multihdLauncher.launchQuartus",  "when": "resourceExtname == .sv", "group": "navigation@5" },
+        { "command": "multihdLauncher.launchGowin",    "when": "resourceExtname == .sv", "group": "navigation@6" },
+        { "command": "multihdLauncher.setPriority",    "when": "resourceExtname == .sv", "group": "navigation@7" },
+        { "command": "multihdLauncher.setConfig",      "when": "resourceExtname == .sv", "group": "navigation@8" },
+        { "command": "multihdLauncher.helpDeps",       "when": "resourceExtname == .sv", "group": "navigation@9" },
+        { "command": "multihdLauncher.setLicense",     "when": "resourceFilename == conf.svconf", "group": "navigation@1" },
+        { "command": "multihdLauncher.editConf",       "when": "resourceFilename == conf.svconf", "group": "navigation@2" },
+        { "command": "multihdLauncher.helpDocs",       "when": "resourceFilename == conf.svconf", "group": "navigation@3" }
       ],
       "editor/title/run": [
-        { "command": "questaLauncher.run",           "when": "resourceExtname == .sv", "group": "navigation@1" },
-        { "command": "questaLauncher.runGui",        "when": "resourceExtname == .sv", "group": "navigation@2" },
-        { "command": "questaLauncher.showWaveform",  "when": "resourceExtname == .sv", "group": "navigation@3" },
-        { "command": "questaLauncher.setQuestaPath", "when": "resourceExtname == .sv", "group": "navigation@4" },
-        { "command": "questaLauncher.setLicense",    "when": "resourceExtname == .sv", "group": "navigation@5" },
-        { "command": "questaLauncher.helpDocs",      "when": "resourceExtname == .sv", "group": "navigation@6" },
-        { "command": "questaLauncher.helpDeps",      "when": "resourceExtname == .sv", "group": "navigation@7" }
+        { "command": "multihdLauncher.openLauncher",   "when": "resourceExtname == .sv", "group": "navigation@0" },
+        { "command": "multihdLauncher.run",            "when": "resourceExtname == .sv", "group": "navigation@1" },
+        { "command": "multihdLauncher.runGui",         "when": "resourceExtname == .sv", "group": "navigation@2" },
+        { "command": "multihdLauncher.showWaveform",   "when": "resourceExtname == .sv", "group": "navigation@3" },
+        { "command": "multihdLauncher.launchQuesta",   "when": "resourceExtname == .sv", "group": "navigation@4" },
+        { "command": "multihdLauncher.setConfig",      "when": "resourceExtname == .sv", "group": "navigation@5" },
+        { "command": "multihdLauncher.helpDocs",       "when": "resourceExtname == .sv", "group": "navigation@6" },
+        { "command": "multihdLauncher.helpDeps",       "when": "resourceExtname == .sv", "group": "navigation@7" }
       ],
       "explorer/context": [
-        { "command": "questaLauncher.run", "when": "resourceExtname == .sv", "group": "questa@1" },
-        { "command": "questaLauncher.setPriority", "when": "resourceExtname == .sv", "group": "questa@2" }
+        { "command": "multihdLauncher.openLauncher",   "when": "resourceExtname == .sv", "group": "multihd@0" },
+        { "command": "multihdLauncher.launchQuesta",   "when": "resourceExtname == .sv", "group": "multihd@1" },
+        { "command": "multihdLauncher.launchQuartus",  "when": "resourceExtname == .sv", "group": "multihd@2" },
+        { "command": "multihdLauncher.launchGowin",    "when": "resourceExtname == .sv", "group": "multihd@3" },
+        { "command": "multihdLauncher.setPriority",    "when": "resourceExtname == .sv", "group": "multihd@4" },
+        { "command": "multihdLauncher.excludeFiles",   "when": "resourceExtname == .sv", "group": "multihd@5" },
+        { "command": "multihdLauncher.libraryManager", "when": "resourceExtname == .sv", "group": "multihd@6" },
+        { "command": "multihdLauncher.gowinCst",       "when": "resourceExtname == .sv", "group": "multihd@7" }
       ]
     },
     "languages": [
@@ -61,42 +81,67 @@
       { "language": "svconf", "scopeName": "source.svconf", "path": "./syntaxes/svconf.tmLanguage.json" }
     ],
     "configuration": {
-      "title": "Questa Launcher",
+      "title": "MultiHD Launcher",
       "properties": {
-        "questaLauncher.questaBin": {
+        "multihdLauncher.vsimPath": {
           "type": "string",
           "default": "",
-          "description": "Path to Questa bin directory (e.g. /home/user/altera/25.1std/questa_fse/linux_x86_64). Leave empty to auto-detect from PATH."
+          "description": "Full path to the Questa vsim binary (e.g. /home/user/altera/25.1std/questa_fse/linux_x86_64/vsim). Empty → auto-detect from questaBin, PATH or known install location."
         },
-        "questaLauncher.extraVlogArgs": {
+        "multihdLauncher.questaBin": {
+          "type": "string",
+          "default": "",
+          "description": "Path to Questa bin directory (e.g. /home/user/altera/25.1std/questa_fse/linux_x86_64). Legacy-compatible setting."
+        },
+        "multihdLauncher.licenseFile": {
+          "type": "string",
+          "default": "",
+          "description": "License file path used by the Questa license guard and exported as LM_LICENSE_FILE. Questa launch is blocked when this is empty or missing."
+        },
+        "multihdLauncher.saltLicenseServer": {
+          "type": "string",
+          "default": "",
+          "description": "SALT_LICENSE_SERVER — Questa FSE/Starter Edition license file path or port@host. Falls back to licenseFile."
+        },
+        "multihdLauncher.licenseServer": {
+          "type": "string",
+          "default": "",
+          "description": "MGLS_LICENSE_FILE — Questa/Siemens license server (port@host)."
+        },
+        "multihdLauncher.alteraLicenseFile": {
+          "type": "string",
+          "default": "",
+          "description": "ALTERAD_LICENSE_FILE — Altera/Intel FPGA license path or port@host."
+        },
+        "multihdLauncher.mtiVcoMode": {
+          "type": "string",
+          "default": "64",
+          "description": "MTI_VCO_MODE injected into the Questa process environment (default 64)."
+        },
+        "multihdLauncher.defaultFolder": {
+          "type": "string",
+          "default": "",
+          "description": "Default project folder used when browsing for a project."
+        },
+        "multihdLauncher.quartusPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the Quartus Prime binary (optional — used by Launch Quartus Prime; falls back to quartus on PATH)."
+        },
+        "multihdLauncher.gowinPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the Gowin gw_ide binary (optional — used by Launch Gowin EDA; falls back to gw_ide on PATH)."
+        },
+        "multihdLauncher.extraVlogArgs": {
           "type": "string",
           "default": "-reportprogress 300",
-          "description": "Extra arguments passed to vlog"
+          "description": "Extra arguments passed to vlog."
         },
-        "questaLauncher.licenseFile": {
-          "type": "string",
-          "default": "",
-          "description": "LM_LICENSE_FILE — general FlexLM license file path or port@host. Overrides environment variable."
-        },
-        "questaLauncher.saltLicenseServer": {
-          "type": "string",
-          "default": "",
-          "description": "SALT_LICENSE_SERVER — Questa FSE/Starter Edition license file path. E.g. /home/user/.licenses/questa_license.dat"
-        },
-        "questaLauncher.licenseServer": {
-          "type": "string",
-          "default": "",
-          "description": "MGLS_LICENSE_FILE — Questa/Siemens license server. Format: port@host"
-        },
-        "questaLauncher.alteraLicenseFile": {
-          "type": "string",
-          "default": "",
-          "description": "ALTERAD_LICENSE_FILE — Altera/Intel FPGA license path or port@host"
-        },
-        "questaLauncher.autoOpenGui": {
+        "multihdLauncher.autoOpenGui": {
           "type": "boolean",
           "default": false,
-          "description": "Open Questa GUI after successful compile"
+          "description": "Open Questa GUI after a successful compile."
         }
       }
     }
@@ -104,7 +149,8 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "package": "npx @vscode/vsce package --no-dependencies"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

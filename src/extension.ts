@@ -1,496 +1,1123 @@
-import * as vscode from 'vscode';
+// ─────────────────────────────────────────────────────────────────────────────
+// MultiHD Launcher — extension entry point (v2.0.0)
+// (see multihd-port/CONTRACT.md §4 commands, §6 architecture, §7.3 panel hosts,
+//  §8 acceptance F1-F13, §11 decisions D1-D10)
+//
+// Contains: activation, command registration (17 `multihdLauncher.*` commands +
+// hidden legacy `questaLauncher.*` aliases), all six panel hosts, Qt-parity
+// launch orchestration (incl. the Gowin CST hand-off, D6), and the preserved
+// Help / Dependency Resolver panels (v1.9.1 behaviour, rebranded, docs loaded
+// from extensionPath at runtime).
+//
+// The heavy lifting lives in src/core/*; this file only wires VS Code APIs.
+// ─────────────────────────────────────────────────────────────────────────────
+
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
-import * as child_process from 'child_process';
+import * as vscode from 'vscode';
 
-// ─── conf.svconf parser ────────────────────────────────────────────────────
+import { LogKind, ProjectInfo, TargetTool } from './models';
+import {
+  getConfigValues,
+  getLicenseStatus,
+  isLicenseFileOk,
+  resolveVsim,
+  saveConfigValues,
+  updateSetting,
+} from './core/config';
+import {
+  GowinCstPayload,
+  LauncherRuntime,
+  launchQuartus,
+  launchQuesta,
+  openInstallQuesta,
+  openLicenseRequest,
+  prepareGowinCst,
+  runCliFlow,
+  runGuiFlow,
+  showWaveformFlow,
+  validateProjectDir,
+  validateTargets,
+  writeGowinProject,
+} from './core/launcher';
+import {
+  activeFilesForTools,
+  buildProjectInfo,
+  defaultConfTemplate,
+  isValidProjectDir,
+  resolveProjectDir,
+  resolveProjectDirSync,
+  scanSvFiles,
+} from './core/project';
+import { ProjectStateStore } from './core/state';
+import { LibraryManager } from './tools/library';
+import type {
+  ConfigHost,
+  CstHost,
+  ExcludeHost,
+  LauncherAction,
+  LauncherHost,
+  LauncherPanelHandle,
+  LauncherState,
+  LibraryHost,
+  PriorityHost,
+} from './ui/api';
+import { isCyberPanelOpen } from './ui/base';
+import { showCstPanel } from './ui/cstPanel';
+import { showConfigPanel } from './ui/configPanel';
+import { showExcludePanel } from './ui/excludePanel';
+import { showLauncherPanel } from './ui/launcherPanel';
+import { showLibraryPanel } from './ui/libraryPanel';
+import { showPriorityPanel } from './ui/priorityPanel';
 
-interface SvConf {
-  compileMode: 'all' | 'list' | number; // number = count
-  priorityList: string[];                // basenames in order
-  tbName: string;                        // @tb (name) — explicit tb file
-  tbPriorityList: string[];              // @tb priority list — tb files in order
-  topModule: string;
-  vsimArgs: string;
-  vlogArgs: string;
-  workLib: string;
+// ─── module state ───────────────────────────────────────────────────────────
+
+let extensionContext!: vscode.ExtensionContext;
+let outputChannel!: vscode.OutputChannel;
+let projectState!: ProjectStateStore;
+let libraryManager: LibraryManager | undefined;
+let launcherPanel: LauncherPanelHandle | undefined;
+
+/** Current project directory shown by the launcher panel ('' = none). */
+let currentProjectDir = '';
+/** COMPILE FOR checkbox state (Qt default: Questa ticked). */
+const launchTargets: Record<TargetTool, boolean> = {
+  questa: true,
+  quartus: false,
+  gowin: false,
+};
+/** True while a multi-target launch sequence is running. */
+let launchBusy = false;
+
+const TARGET_ORDER: TargetTool[] = ['questa', 'quartus', 'gowin'];
+
+// ─── logging ────────────────────────────────────────────────────────────────
+
+/** Write a log line to the “MultiHD Launcher” Output channel + launcher panel. */
+function log(line: string, _kind: LogKind = 'plain'): void {
+  outputChannel.appendLine(line);
+  appendLogToLauncherPanel(line);
 }
 
-function defaultConf(): SvConf {
-  return {
-    compileMode: 'all',
-    priorityList: [],
-    tbName: '',
-    tbPriorityList: [],
-    topModule: '',
-    vsimArgs: '',
-    vlogArgs: '',
-    workLib: 'work'
-  };
+/** The panel handle exposes `disposed` at runtime (LauncherPanelHandleImpl). */
+function launcherHandleAlive(): boolean {
+  if (!launcherPanel) return false;
+  const maybe = launcherPanel as unknown as { disposed?: boolean };
+  return maybe.disposed !== true;
 }
 
-function parseConf(confPath: string): SvConf {
-  const conf = defaultConf();
-  if (!fs.existsSync(confPath)) return conf;
-
-  const lines = fs.readFileSync(confPath, 'utf8').split('\n');
-  let inPriority = false;
-  let inTbPriority = false;
-
-  for (const raw of lines) {
-    const line = raw.trim();
-    if (!line || line.startsWith('#')) { inPriority = false; inTbPriority = false; continue; }
-
-    // compile @(all)  /  compile @(1)  /  compile @(list)
-    const compileMatch = line.match(/^compile\s+@\((.+?)\)/i);
-    if (compileMatch) {
-      const val = compileMatch[1].trim().toLowerCase();
-      if (val === 'all') conf.compileMode = 'all';
-      else if (val === 'list') conf.compileMode = 'list';
-      else conf.compileMode = parseInt(val) || 'all';
-      inPriority = false; inTbPriority = false;
-      continue;
-    }
-
-    // @tb (filename.sv)  — explicit tb name
-    const tbNameMatch = line.match(/^@tb\s+\(([^)]+)\)/i);
-    if (tbNameMatch) { conf.tbName = tbNameMatch[1].trim(); inPriority = false; inTbPriority = false; continue; }
-
-    // @tb priority list
-    if (line.match(/^@tb\s+priority\s+list/i)) {
-      inTbPriority = true; inPriority = false;
-      conf.tbPriorityList = [];
-      continue;
-    }
-
-    // @priority list encoder:
-    if (line.match(/^@priority\s+list/i)) {
-      inPriority = true; inTbPriority = false;
-      conf.priorityList = [];
-      continue;
-    }
-
-    // @topmodule: counter16_tb
-    const topMatch = line.match(/^@topmodule\s*:\s*(.+)/i);
-    if (topMatch) { conf.topModule = topMatch[1].trim(); inPriority = false; inTbPriority = false; continue; }
-
-    // @vsimargs: -voptargs=+acc
-    const vsimMatch = line.match(/^@vsimargs\s*:\s*(.+)/i);
-    if (vsimMatch) { conf.vsimArgs = vsimMatch[1].trim(); inPriority = false; inTbPriority = false; continue; }
-
-    // @vlogargs: -sv -quiet
-    const vlogMatch = line.match(/^@vlogargs\s*:\s*(.+)/i);
-    if (vlogMatch) { conf.vlogArgs = vlogMatch[1].trim(); inPriority = false; inTbPriority = false; continue; }
-
-    // @work: work
-    const workMatch = line.match(/^@work\s*:\s*(.+)/i);
-    if (workMatch) { conf.workLib = workMatch[1].trim(); inPriority = false; inTbPriority = false; continue; }
-
-    // inside @tb priority list block
-    if (inTbPriority && (line.startsWith('-') || /^\d+\./.test(line) || line.endsWith('.sv'))) {
-      const fname = line.replace(/^[-\d.]\s*/, '').trim();
-      if (fname) conf.tbPriorityList.push(fname);
-      continue;
-    }
-
-    // inside priority block — indented file lines
-    if (inPriority && (line.startsWith('-') || /^\d+\./.test(line) || line.endsWith('.sv'))) {
-      const fname = line.replace(/^[-\d.]\s*/, '').trim();
-      if (fname) conf.priorityList.push(fname);
-    }
+function appendLogToLauncherPanel(line: string): void {
+  if (!launcherHandleAlive()) {
+    launcherPanel = undefined;
+    return;
   }
-
-  return conf;
-}
-
-// ─── file ordering ────────────────────────────────────────────────────────
-
-function orderFiles(allFiles: string[], openedFile: string, conf: SvConf): string[] {
-  const openedBase = path.basename(openedFile);
-
-  // Separate tb files from non-tb files
-  const isTb = (f: string) => path.basename(f).includes('_tb') || path.basename(f).startsWith('tb_');
-
-  // Build tb order: tbPriorityList first, then @tb (name), then any _tb files, opened _tb if applicable
-  const tbOrdered: string[] = [];
-  const nonTbOrdered: string[] = [];
-  const remaining = [...allFiles];
-
-  // 1. Process @tb priority list first
-  for (const pname of conf.tbPriorityList) {
-    const idx = remaining.findIndex(f => path.basename(f) === pname);
-    if (idx !== -1) tbOrdered.push(remaining.splice(idx, 1)[0]);
-  }
-
-  // 2. @tb (name) explicit tb — if not already added
-  if (conf.tbName) {
-    const idx = remaining.findIndex(f => path.basename(f) === conf.tbName);
-    if (idx !== -1) tbOrdered.push(remaining.splice(idx, 1)[0]);
-  }
-
-  // 3. If opened file is a _tb and not already listed, it goes first among tbs
-  if (isTb(openedFile)) {
-    const idx = remaining.findIndex(f => f === openedFile);
-    if (idx !== -1) tbOrdered.unshift(remaining.splice(idx, 1)[0]);
-  }
-
-  // 4. Remaining _tb files
-  for (let i = remaining.length - 1; i >= 0; i--) {
-    if (isTb(remaining[i])) tbOrdered.push(remaining.splice(i, 1)[0]);
-  }
-
-  // 5. Non-tb: process @priority list
-  for (const pname of conf.priorityList) {
-    const idx = remaining.findIndex(f => path.basename(f) === pname);
-    if (idx !== -1) nonTbOrdered.push(remaining.splice(idx, 1)[0]);
-  }
-
-  // 6. Opened file (non-tb) goes first among non-tb if not already listed
-  if (!isTb(openedFile)) {
-    const idx = remaining.findIndex(f => f === openedFile);
-    if (idx !== -1) nonTbOrdered.unshift(remaining.splice(idx, 1)[0]);
-  }
-
-  // 7. Rest sorted alphabetically
-  remaining.sort();
-
-  // Final order: non-tb first (dependencies), then tb files last (they depend on the rest)
-  return [...nonTbOrdered, ...remaining, ...tbOrdered];
-}
-
-// ─── run.do generator ────────────────────────────────────────────────────
-
-function generateRunDo(
-  files: string[],
-  conf: SvConf,
-  cfg: vscode.WorkspaceConfiguration,
-  mode: 'cli' | 'gui' = 'gui'
-): string {
-  const workLib = conf.workLib || 'work';
-  const confVlog = conf.vlogArgs ? conf.vlogArgs : '';
-  const allVlogArgs = ['-work', workLib, confVlog].filter(Boolean).join(' ');
-
-  const filesToCompile = (() => {
-    if (conf.compileMode === 'all') return files;
-    if (typeof conf.compileMode === 'number') return files.slice(0, conf.compileMode);
-    return files; // 'list' — already ordered
-  })();
-
-  const fileList = filesToCompile.map(f => path.basename(f)).join(' ');
-
-  // Determine top module: @topmodule > @tb (name) stem > detected _tb file stem > first file stem
-  const tbFile = conf.tbName
-    || filesToCompile.map(f => path.basename(f)).find(b => b.includes('_tb') || b.startsWith('tb_'))
-    || '';
-  const topModule = conf.topModule
-    || (tbFile ? tbFile.replace(/\.sv$/i, '') : '')
-    || path.basename(filesToCompile[filesToCompile.length - 1]).replace(/\.sv$/i, '');
-
-  const optTarget  = `${workLib}.${topModule}`;
-  const optOut     = `${topModule}_opt`;
-  const vsimArgs   = conf.vsimArgs || '';
-
-  let doScript = `quietly vlib ${workLib}\n`;
-  doScript += `vlog ${allVlogArgs} ${fileList}\n`;
-  doScript += `vopt +acc ${optTarget} -o ${optOut}\n`;
-  doScript += `vsim ${vsimArgs ? vsimArgs + ' ' : ''}${optOut}\n`;
-  if (mode === 'gui') {
-    doScript += `add wave -r /*\n`;
-  }
-  doScript += `run -all\n`;
-  if (mode === 'cli') {
-    doScript += `quit -f\n`;
-  }
-  return doScript;
-}
-
-// ─── questa binary resolution ─────────────────────────────────────────────
-
-function resolveQuesta(cfg: vscode.WorkspaceConfiguration): string {
-  const bin = cfg.get<string>('questaBin');
-  if (bin) return path.join(bin, 'vsim');
-  // try PATH
   try {
-    const which = child_process.execSync('which vsim 2>/dev/null').toString().trim();
-    if (which) return which;
-  } catch {}
-  // known default
-  const def = '/home/bismillah/altera/25.1std/questa_fse/linux_x86_64/vsim';
-  if (fs.existsSync(def)) return def;
-  return 'vsim';
-}
-
-function resolveEnv(cfg: vscode.WorkspaceConfiguration): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  env['MTI_VCO_MODE'] = '64';
-  env['QSIM_VCO_MODE'] = '64';
-
-  // DISPLAY — required for Questa GUI on Linux; inherit from VS Code process or default to :0
-  if (!env['DISPLAY']) env['DISPLAY'] = ':0';
-
-  // SALT_LICENSE_SERVER — Questa FSE/Starter edition (highest priority)
-  const saltLic = cfg.get<string>('saltLicenseServer')
-    || process.env['SALT_LICENSE_SERVER']
-    || '/home/bismillah/.licenses/questa_license.dat';
-  env['SALT_LICENSE_SERVER'] = saltLic;
-
-  const lic = cfg.get<string>('licenseFile');
-  if (lic) env['LM_LICENSE_FILE'] = lic;
-
-  const licServer = cfg.get<string>('licenseServer');
-  if (licServer) env['MGLS_LICENSE_FILE'] = licServer;
-
-  const alteraLic = cfg.get<string>('alteraLicenseFile');
-  if (alteraLic) env['ALTERAD_LICENSE_FILE'] = alteraLic;
-
-  const bin = cfg.get<string>('questaBin');
-  if (bin) {
-    env['PATH'] = bin + ':' + (env['PATH'] || '');
+    launcherPanel?.appendLog(line);
+  } catch {
+    // Panel was disposed — the next open creates a fresh handle.
+    launcherPanel = undefined;
   }
-  return env;
 }
 
-// ─── Priority picker UI ───────────────────────────────────────────────────
+function refreshLauncherPanel(): void {
+  if (!launcherHandleAlive()) {
+    launcherPanel = undefined;
+    return;
+  }
+  try {
+    launcherPanel?.refresh();
+  } catch {
+    launcherPanel = undefined;
+  }
+}
 
-async function runPriorityPicker(dirFiles: string[], openedFile: string, confPath: string): Promise<void> {
-  const conf = parseConf(confPath);
-  const basenames = dirFiles.map(f => path.basename(f));
+function launcherRuntime(): LauncherRuntime {
+  return { context: extensionContext, libraryManager, log };
+}
 
-  // Build QuickPick items with current order shown
-  type PItem = vscode.QuickPickItem & { basename: string };
+// ─── project info helpers ───────────────────────────────────────────────────
 
-  const makeItems = (order: string[]): PItem[] => {
-    return basenames.map(b => {
-      const pos = order.indexOf(b);
-      return {
-        label: pos >= 0 ? `[${String(pos + 1).padStart(2, '0')}] ${b}` : `      ${b}`,
-        basename: b,
-        picked: pos >= 0
-      };
+function buildInfoForDir(dir: string): ProjectInfo {
+  const info = buildProjectInfo(
+    dir,
+    projectState.excludedFiles(dir),
+    projectState.customOrder(dir)
+  );
+  void projectState.prune(dir, info.allSvFiles);
+  return info;
+}
+
+function currentInfo(): ProjectInfo | undefined {
+  if (!currentProjectDir || !isValidProjectDir(currentProjectDir)) return undefined;
+  return buildInfoForDir(currentProjectDir);
+}
+
+function setCurrentProjectDir(dir: string): void {
+  currentProjectDir = path.resolve(dir);
+  if (isValidProjectDir(currentProjectDir)) {
+    void projectState.prune(currentProjectDir, scanSvFiles(currentProjectDir));
+  }
+  refreshLauncherPanel();
+}
+
+function uriFromArgs(args: unknown[]): vscode.Uri | undefined {
+  const first = args[0];
+  return first instanceof vscode.Uri ? first : undefined;
+}
+
+async function pickProjectFolder(startDir?: string): Promise<string | undefined> {
+  const picked = await vscode.window.showOpenDialog({
+    title: 'Select Project Folder',
+    canSelectFiles: false,
+    canSelectFolders: true,
+    canSelectMany: false,
+    openLabel: 'Select folder',
+    defaultUri:
+      startDir && isValidProjectDir(startDir) ? vscode.Uri.file(startDir) : undefined,
+  });
+  return picked?.[0]?.fsPath;
+}
+
+/** Resolve project info for a launch command (Qt validation messages apply). */
+async function resolveInfoForLaunch(uri?: vscode.Uri): Promise<ProjectInfo | undefined> {
+  const dir = await resolveProjectDir(uri, { prompt: true });
+  if (!dir || !isValidProjectDir(dir)) {
+    await vscode.window.showWarningMessage('Please select a valid project folder.');
+    return undefined;
+  }
+  currentProjectDir = dir;
+  return buildInfoForDir(dir);
+}
+
+/**
+ * Resolve project info for the preserved v1.9.1 commands. Uses the v1.9.1
+ * `No .sv file open.` / `No .sv files found in directory.` error texts.
+ */
+async function resolveInfoForFileCommand(
+  uri?: vscode.Uri
+): Promise<ProjectInfo | undefined> {
+  const dir = await resolveProjectDir(uri, { prompt: true });
+  if (!dir) {
+    void vscode.window.showErrorMessage('No .sv file open.');
+    return undefined;
+  }
+  currentProjectDir = dir;
+  const info = buildInfoForDir(dir);
+  if (info.allSvFiles.length === 0) {
+    void vscode.window.showErrorMessage('No .sv files found in directory.');
+    return undefined;
+  }
+  return info;
+}
+
+// ─── launcher panel host (CONTRACT §7.3) ────────────────────────────────────
+
+const launcherHost: LauncherHost = {
+  getState(): LauncherState {
+    const info = currentInfo();
+    const values = getConfigValues();
+    const license = getLicenseStatus(values);
+    return {
+      projectDir: currentProjectDir,
+      hasProject: !!info,
+      svFileCount: info?.allSvFiles.length ?? 0,
+      targets: { ...launchTargets },
+      licenseOk: license.ok,
+      licensePath: license.path,
+      licenseMessage: license.message,
+      excludedFiles: info?.excludedFiles ?? [],
+      customOrder: info?.customOrder ?? [],
+      vsimPath: resolveVsim(values).path,
+      busy: launchBusy,
+    };
+  },
+
+  async dispatch(action: LauncherAction): Promise<void> {
+    switch (action.type) {
+      case 'browse': {
+        const picked = await pickProjectFolder(
+          currentProjectDir || getConfigValues().defaultFolder
+        );
+        if (picked) setCurrentProjectDir(picked);
+        refreshLauncherPanel();
+        return;
+      }
+      case 'setFolder': {
+        if (action.dir && action.dir.trim()) setCurrentProjectDir(action.dir.trim());
+        refreshLauncherPanel();
+        return;
+      }
+      case 'refresh': {
+        refreshLauncherPanel();
+        return;
+      }
+      case 'toggleTarget': {
+        launchTargets[action.tool] = action.checked;
+        return;
+      }
+      case 'openConfig': {
+        await vscode.commands.executeCommand('multihdLauncher.setConfig');
+        return;
+      }
+      case 'openPriority': {
+        await openPriorityForCurrentDir();
+        return;
+      }
+      case 'openExclude': {
+        await openExcludeForCurrentDir();
+        return;
+      }
+      case 'openLibrary': {
+        await vscode.commands.executeCommand('multihdLauncher.libraryManager');
+        return;
+      }
+      case 'openGowinCst': {
+        await openGowinCstForCurrentDir();
+        return;
+      }
+      case 'installQuesta': {
+        await openInstallQuesta(launcherRuntime());
+        return;
+      }
+      case 'licenseRequest': {
+        await openLicenseRequest(launcherRuntime());
+        return;
+      }
+      case 'restoreFile': {
+        await restoreExcludedFile(action.file);
+        return;
+      }
+      case 'launch': {
+        await launchFromPanel();
+        return;
+      }
+      default: {
+        const exhaustive: never = action;
+        void exhaustive;
+        return;
+      }
+    }
+  },
+};
+
+function ensureLauncherPanel(): LauncherPanelHandle {
+  if (!launcherPanel) {
+    launcherPanel = showLauncherPanel(extensionContext, launcherHost);
+  }
+  return launcherPanel;
+}
+
+function revealLauncherPanel(): void {
+  if (!launcherHandleAlive()) launcherPanel = undefined;
+  try {
+    ensureLauncherPanel().reveal();
+  } catch {
+    launcherPanel = showLauncherPanel(extensionContext, launcherHost);
+    launcherPanel.reveal();
+  }
+}
+
+// ─── launch orchestration ───────────────────────────────────────────────────
+
+/**
+ * Qt `MainWindow::launch()` sequence: validate folder → validate targets →
+ * Questa → Quartus → Gowin. A blocked Questa license does not stop Quartus /
+ * Gowin (Qt parity, F3).
+ */
+async function performLaunch(info: ProjectInfo, selected: TargetTool[]): Promise<void> {
+  if (!(await validateProjectDir(info.dir))) return;
+  if (!(await validateTargets(selected))) return;
+
+  launchBusy = true;
+  refreshLauncherPanel();
+  try {
+    for (const tool of TARGET_ORDER) {
+      if (!selected.includes(tool)) continue;
+      if (tool === 'questa') {
+        await launchQuesta(launcherRuntime(), info);
+      } else if (tool === 'quartus') {
+        await launchQuartus(launcherRuntime(), info);
+      } else {
+        await launchGowinWithCst(info);
+      }
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    log(`✗ Launch failed: ${message}`, 'red');
+    void vscode.window.showErrorMessage(`MultiHD Launcher: ${message}`);
+  } finally {
+    launchBusy = false;
+    refreshLauncherPanel();
+  }
+}
+
+async function launchFromPanel(): Promise<void> {
+  const info = currentInfo();
+  if (!info) {
+    await vscode.window.showWarningMessage('Please select a valid project folder.');
+    return;
+  }
+  const selected = TARGET_ORDER.filter((tool) => launchTargets[tool]);
+  await performLaunch(info, selected);
+}
+
+/**
+ * Gowin CST hand-off (D6): extension.ts opens the webview and resolves a
+ * promise; core/launcher receives cst/device/pn and writes + launches.
+ */
+interface CstPanelHandleLike {
+  onDidDispose?: (callback: () => void) => void;
+  dispose?: () => void;
+}
+
+function requestGowinCst(info: ProjectInfo): Promise<GowinCstPayload | undefined> {
+  return new Promise<GowinCstPayload | undefined>((resolve) => {
+    const request = prepareGowinCst(info);
+    let settled = false;
+    let saved = false;
+    let poll: NodeJS.Timeout | undefined;
+
+    const stopWatching = (): void => {
+      if (poll) {
+        clearInterval(poll);
+        poll = undefined;
+      }
+    };
+    const finish = (payload?: GowinCstPayload): void => {
+      if (settled) return;
+      settled = true;
+      stopWatching();
+      resolve(payload);
+    };
+
+    const host: CstHost = {
+      getState: () => ({
+        dir: request.dir,
+        topFile: request.topFile,
+        svText: request.svText,
+        device: request.device,
+        pn: request.pn,
+        cst: request.cst,
+      }),
+      save: async (payload: GowinCstPayload): Promise<void> => {
+        saved = true;
+        finish(payload);
+      },
+    };
+
+    // Optional 3rd callback is provided by newer panel versions; older ones
+    // ignore it (extra argv is harmless at runtime).
+    const show = showCstPanel as unknown as (
+      context: vscode.ExtensionContext,
+      panelHost: CstHost,
+      onCancel?: () => void
+    ) => CstPanelHandleLike | undefined;
+    const maybeHandle = show(extensionContext, host, () => {
+      if (!saved) finish(undefined);
     });
+    maybeHandle?.onDidDispose?.(() => {
+      if (!saved) finish(undefined);
+    });
+
+    // Reliable fallback that works with today's void-returning showCstPanel:
+    // watch the shared panel registry; a closed tab means "cancelled" (D6).
+    poll = setInterval(() => {
+      if (settled) {
+        stopWatching();
+        return;
+      }
+      if (!isCyberPanelOpen('multihdLauncher.cstPanel')) {
+        if (!saved) finish(undefined);
+        else stopWatching();
+      }
+    }, 250);
+  });
+}
+
+async function launchGowinWithCst(info: ProjectInfo): Promise<void> {
+  const active = activeFilesForTools(info.allSvFiles, info.excludedFiles);
+  if (active.length === 0) {
+    log('✗ [Gowin] No active .sv files to add.', 'red');
+    return;
+  }
+  log('◆ [Gowin] Opening constraint editor...', 'green');
+  const payload = await requestGowinCst(info);
+  if (!payload) {
+    log('✗ [Gowin] Cancelled — no files written.', 'red');
+    return;
+  }
+  await writeGowinProject(launcherRuntime(), info, payload, true);
+}
+
+async function openGowinCstForCurrentDir(): Promise<void> {
+  const info = currentInfo();
+  if (!info) {
+    await vscode.window.showWarningMessage('Please select a valid project folder.');
+    return;
+  }
+  openStandaloneCstPanel(info);
+}
+
+/** Gowin CST editor standalone (no IDE launch, contract §4 command table). */
+function openStandaloneCstPanel(info: ProjectInfo): void {
+  const request = prepareGowinCst(info);
+  const host: CstHost = {
+    getState: () => ({
+      dir: request.dir,
+      topFile: request.topFile,
+      svText: request.svText,
+      device: request.device,
+      pn: request.pn,
+      cst: request.cst,
+    }),
+    save: async (payload: GowinCstPayload): Promise<void> => {
+      await writeGowinProject(launcherRuntime(), info, payload, false);
+      refreshLauncherPanel();
+    },
   };
+  showCstPanel(extensionContext, host);
+}
 
-  let currentOrder: string[] = conf.priorityList.length > 0
-    ? conf.priorityList
-    : [path.basename(openedFile)];
+// ─── config panel host (CONTRACT §7.3) ──────────────────────────────────────
 
-  const qp = vscode.window.createQuickPick<PItem>();
-  qp.title = '⇅ Set Compile Priority — click to add/remove, use buttons to reorder';
-  qp.canSelectMany = false;
-  qp.items = makeItems(currentOrder);
+type ConfigBrowseKind = Parameters<ConfigHost['browse']>[0];
 
-  qp.buttons = [
-    { iconPath: new vscode.ThemeIcon('arrow-up'), tooltip: 'Move selected up' },
-    { iconPath: new vscode.ThemeIcon('arrow-down'), tooltip: 'Move selected down' },
-    { iconPath: new vscode.ThemeIcon('refresh'), tooltip: 'Reset order' },
-    { iconPath: new vscode.ThemeIcon('check'), tooltip: 'Save & close' }
+async function browseConfigField(
+  kind: ConfigBrowseKind,
+  current: string
+): Promise<string | undefined> {
+  const startUri =
+    current && current.trim()
+      ? kind === 'folder'
+        ? vscode.Uri.file(current.trim())
+        : vscode.Uri.file(current.trim())
+      : vscode.Uri.file(os.homedir());
+
+  const picked = await vscode.window.showOpenDialog({
+    canSelectFiles: kind !== 'folder',
+    canSelectFolders: kind === 'folder',
+    canSelectMany: false,
+    title:
+      kind === 'vsim'
+        ? 'Select vsim binary'
+        : kind === 'license'
+          ? 'Select Questa license file'
+          : kind === 'folder'
+            ? 'Default project folder'
+            : kind === 'quartus'
+              ? 'Select Quartus binary'
+              : 'Select Gowin IDE binary',
+    openLabel:
+      kind === 'vsim'
+        ? 'Use this vsim'
+        : kind === 'license'
+          ? 'Use this license'
+          : kind === 'folder'
+            ? 'Use this folder'
+            : 'Use this binary',
+    filters:
+      kind === 'license'
+        ? { 'License files': ['dat', 'lic'], 'All files': ['*'] }
+        : undefined,
+    defaultUri: startUri,
+  });
+  return picked?.[0]?.fsPath;
+}
+
+const configHost: ConfigHost = {
+  load: () => getConfigValues(),
+  save: async (values) => {
+    await saveConfigValues(values);
+    log('⚙ Configuration saved.', 'purple');
+    refreshLauncherPanel();
+  },
+  isLicenseOk: (values) => isLicenseFileOk(values.licenseFile),
+  browse: browseConfigField,
+};
+
+function openConfigPanel(): void {
+  showConfigPanel(extensionContext, configHost);
+}
+
+// ─── exclude panel host (CONTRACT §7.3) ────────────────────────────────────
+
+async function applyExclusions(dir: string, excluded: string[]): Promise<void> {
+  const files = scanSvFiles(dir);
+  const valid = excluded.filter((file) => files.includes(file));
+  await projectState.setExcludedFiles(dir, valid);
+
+  if (valid.length > 0) {
+    log(`✕ ${valid.length} file(s) excluded from compilation:`, 'red');
+    for (const file of valid) log(`    ${file}`, 'dim');
+  } else {
+    log('✓ All files included (no exclusions).', 'green');
+  }
+  refreshLauncherPanel();
+}
+
+async function openExcludeForCurrentDir(): Promise<void> {
+  const dir = currentProjectDir;
+  if (!dir || !isValidProjectDir(dir)) {
+    await vscode.window.showWarningMessage('Please select a project folder first.');
+    return;
+  }
+  openExcludePanelForDir(dir);
+}
+
+function openExcludePanelForDir(dir: string): void {
+  const files = scanSvFiles(dir);
+  if (files.length === 0) {
+    void vscode.window.showInformationMessage('No .sv files found in the selected folder.');
+    return;
+  }
+  const host: ExcludeHost = {
+    getState: () => ({
+      dir,
+      files,
+      excluded: projectState.excludedFiles(dir).filter((file) => files.includes(file)),
+    }),
+    apply: async (excluded) => {
+      await applyExclusions(dir, excluded);
+    },
+  };
+  showExcludePanel(extensionContext, host);
+}
+
+async function restoreExcludedFile(file: string): Promise<void> {
+  const dir = currentProjectDir;
+  if (!dir || !isValidProjectDir(dir)) return;
+  const excluded = projectState.excludedFiles(dir).filter((entry) => entry !== file);
+  await projectState.setExcludedFiles(dir, excluded);
+  log(`↩ Restored: ${file}`, 'green');
+  refreshLauncherPanel();
+}
+
+// ─── priority (compile order) panel host (CONTRACT §7.3) ────────────────────
+
+async function applyCustomOrder(dir: string, order: string[]): Promise<void> {
+  const allowed = scanSvFiles(dir);
+  const valid = order.filter((file) => allowed.includes(file));
+  await projectState.setCustomOrder(dir, valid);
+
+  if (valid.length === 0) {
+    log('✓ Compile order reset to default.', 'green');
+  } else {
+    log('⚡ Custom compile order set:', 'orange');
+    valid.forEach((file, index) => log(`  [${index + 1}] ${file}`, 'orange'));
+  }
+  refreshLauncherPanel();
+}
+
+interface PriorityDialogState {
+  files: string[];
+  customOrder: string[];
+}
+
+function priorityDialogState(dir: string): PriorityDialogState {
+  const info = buildInfoForDir(dir);
+  let files = activeFilesForTools(info.allSvFiles, info.excludedFiles);
+  const customOrder = info.customOrder;
+  if (customOrder.length > 0) {
+    const filtered = customOrder.filter((file) => files.includes(file));
+    for (const file of files) {
+      if (!filtered.includes(file)) filtered.push(file);
+    }
+    files = filtered;
+  }
+  return { files, customOrder };
+}
+
+async function openPriorityForCurrentDir(): Promise<void> {
+  const dir = currentProjectDir;
+  if (!dir || !isValidProjectDir(dir)) {
+    await vscode.window.showWarningMessage('Please select a project folder first.');
+    return;
+  }
+  openPriorityPanelForDir(dir);
+}
+
+function openPriorityPanelForDir(dir: string): void {
+  const initial = priorityDialogState(dir);
+  if (initial.files.length === 0) {
+    void vscode.window.showWarningMessage(
+      'No .sv files available (all may be excluded).\n' +
+        'Restore some files from the EXCLUDED FILES panel first.'
+    );
+    return;
+  }
+  const host: PriorityHost = {
+    getState: () => {
+      const state = priorityDialogState(dir);
+      return { dir, files: state.files, customOrder: state.customOrder };
+    },
+    apply: async (order) => {
+      await applyCustomOrder(dir, order);
+    },
+  };
+  showPriorityPanel(extensionContext, host);
+}
+
+// ─── library manager panel host (CONTRACT §7.3) ────────────────────────────
+
+function libraryEntries(): Array<{
+  name: string;
+  sourcePath: string;
+  compiled: boolean;
+  compiledAt: string;
+}> {
+  if (!libraryManager) return [];
+  return libraryManager.libraries().map((entry) => ({
+    name: entry.name,
+    sourcePath: entry.sourcePath,
+    compiled: entry.compiled,
+    compiledAt: typeof entry.compiledAt === 'string' ? entry.compiledAt : '',
+  }));
+}
+
+const libraryHost: LibraryHost = {
+  getState: () => {
+    const values = getConfigValues();
+    return {
+      projectDir: currentProjectDir,
+      vsimPath: resolveVsim(values).path,
+      libraries: libraryEntries(),
+      projectDeps:
+        currentProjectDir && isValidProjectDir(currentProjectDir) && libraryManager
+          ? libraryManager.projectDeps(currentProjectDir)
+          : [],
+    };
+  },
+
+  addLibrary: async (name, sourcePath) => {
+    if (!libraryManager) return { ok: false, error: 'Library manager unavailable.' };
+    const result = libraryManager.addLibrary(name, sourcePath);
+    if (result.ok) {
+      log(`✓ Library "${name.trim()}" registered. Compile it to use it.`, 'green');
+    } else if (result.error) {
+      log(`✕ ${result.error}`, 'red');
+    }
+    return result;
+  },
+
+  removeLibrary: async (name) => {
+    if (!libraryManager) return { ok: false, error: 'Library manager unavailable.' };
+    const result = libraryManager.removeLibrary(name);
+    if (result.ok) {
+      log(`✓ Library "${name}" removed.`, 'green');
+    } else if (result.error) {
+      log(`✕ ${result.error}`, 'red');
+    }
+    return result;
+  },
+
+  compileLibrary: async (name) => {
+    if (!libraryManager) return { ok: false, error: 'Library manager unavailable.' };
+    const vsim = resolveVsim(getConfigValues());
+    if (!vsim.found) {
+      return { ok: false, error: 'vsim path not configured. Open ⚙ CONFIG first.' };
+    }
+    log(`⚡ Compiling library "${name}" ...`, 'orange');
+    const result = await libraryManager.compileLibrary(name, vsim.path);
+    if (result.ok) {
+      log(`✓ Library "${name}" compiled.`, 'green');
+    } else if (result.error) {
+      log(`✕ ${result.error}`, 'red');
+    }
+    return result;
+  },
+
+  setProjectDeps: async (deps) => {
+    if (!currentProjectDir || !isValidProjectDir(currentProjectDir)) return;
+    if (!libraryManager) return;
+    libraryManager.setProjectDeps(currentProjectDir, deps);
+    log(`📦 Project libraries: ${deps.join(', ')}`, 'cyan');
+    refreshLauncherPanel();
+  },
+
+  browseFolder: async (current) => {
+    const picked = await vscode.window.showOpenDialog({
+      title: 'Select Library Source Folder',
+      canSelectFiles: false,
+      canSelectFolders: true,
+      canSelectMany: false,
+      openLabel: 'Use this folder',
+      defaultUri: current && isValidProjectDir(current) ? vscode.Uri.file(current) : vscode.Uri.file(os.homedir()),
+    });
+    return picked?.[0]?.fsPath;
+  },
+};
+
+function openLibraryPanel(): void {
+  showLibraryPanel(extensionContext, libraryHost);
+}
+
+// ─── command handlers ───────────────────────────────────────────────────────
+
+async function cmdOpenLauncher(uri?: vscode.Uri): Promise<void> {
+  const dir = await resolveProjectDir(uri, { prompt: false });
+  if (dir) currentProjectDir = dir;
+  revealLauncherPanel();
+}
+
+async function cmdRunCli(uri?: vscode.Uri): Promise<void> {
+  const info = await resolveInfoForFileCommand(uri);
+  if (info) await runCliFlow(launcherRuntime(), info);
+}
+
+async function cmdRunGui(uri?: vscode.Uri): Promise<void> {
+  const info = await resolveInfoForFileCommand(uri);
+  if (info) await runGuiFlow(launcherRuntime(), info);
+}
+
+async function cmdShowWaveform(uri?: vscode.Uri): Promise<void> {
+  const info = await resolveInfoForFileCommand(uri);
+  if (info) await showWaveformFlow(launcherRuntime(), info);
+}
+
+async function cmdLaunchQuesta(uri?: vscode.Uri): Promise<void> {
+  const info = await resolveInfoForLaunch(uri);
+  if (info) await performLaunch(info, ['questa']);
+}
+
+async function cmdLaunchQuartus(uri?: vscode.Uri): Promise<void> {
+  const info = await resolveInfoForLaunch(uri);
+  if (info) await performLaunch(info, ['quartus']);
+}
+
+async function cmdLaunchGowin(uri?: vscode.Uri): Promise<void> {
+  const info = await resolveInfoForLaunch(uri);
+  if (info) await performLaunch(info, ['gowin']);
+}
+
+async function cmdSetConfig(): Promise<void> {
+  openConfigPanel();
+}
+
+async function cmdSetPriority(uri?: vscode.Uri): Promise<void> {
+  const dir = await resolveProjectDir(uri, { prompt: true });
+  if (!dir || !isValidProjectDir(dir)) {
+    await vscode.window.showWarningMessage('Please select a project folder first.');
+    return;
+  }
+  currentProjectDir = dir;
+  openPriorityPanelForDir(dir);
+}
+
+async function cmdExcludeFiles(uri?: vscode.Uri): Promise<void> {
+  const dir = await resolveProjectDir(uri, { prompt: true });
+  if (!dir || !isValidProjectDir(dir)) {
+    await vscode.window.showWarningMessage('Please select a project folder first.');
+    return;
+  }
+  currentProjectDir = dir;
+  openExcludePanelForDir(dir);
+}
+
+async function cmdLibraryManager(uri?: vscode.Uri): Promise<void> {
+  const dir = await resolveProjectDir(uri, { prompt: false });
+  if (dir && isValidProjectDir(dir)) currentProjectDir = dir;
+  openLibraryPanel();
+}
+
+async function cmdGowinCst(uri?: vscode.Uri): Promise<void> {
+  const dir = await resolveProjectDir(uri, { prompt: true });
+  if (!dir || !isValidProjectDir(dir)) {
+    await vscode.window.showWarningMessage('Please select a valid project folder.');
+    return;
+  }
+  currentProjectDir = dir;
+  openStandaloneCstPanel(buildInfoForDir(dir));
+}
+
+async function cmdInstallHelpers(): Promise<void> {
+  const runtime = launcherRuntime();
+  await openInstallQuesta(runtime);
+  await openLicenseRequest(runtime);
+}
+
+/**
+ * Preserved v1.9.1 Set License picker (rebranded), writing the v2 settings with
+ * the same SALT_LICENSE_SERVER / LM_LICENSE_FILE semantics.
+ */
+async function cmdSetLicense(): Promise<void> {
+  const values = getConfigValues();
+  const currentSalt = values.saltLicenseServer || process.env['SALT_LICENSE_SERVER'] || '';
+  const currentLm = values.licenseFile || process.env['LM_LICENSE_FILE'] || '';
+
+  type LicItem = vscode.QuickPickItem & { action: string };
+
+  const items: LicItem[] = [
+    {
+      label: '$(key) SALT_LICENSE_SERVER',
+      description: currentSalt || '(not set)',
+      detail: 'Questa FSE / Starter Edition — path to .dat file or port@host',
+      action: 'salt',
+    },
+    {
+      label: '$(file) LM_LICENSE_FILE',
+      description: currentLm || '(not set)',
+      detail: 'General FlexLM — path to license file or port@host',
+      action: 'lm',
+    },
+    {
+      label: '$(folder-opened) Browse for license file…',
+      description: '',
+      detail: 'Open a file picker to locate your .dat / .lic file',
+      action: 'browse',
+    },
+    {
+      label: '$(refresh) Auto-detect from environment',
+      description: '',
+      detail: 'Re-read SALT_LICENSE_SERVER / LM_LICENSE_FILE from your shell environment',
+      action: 'autodetect',
+    },
   ];
 
-  qp.onDidTriggerButton(btn => {
-    const sel = qp.activeItems[0];
-    if (!sel) return;
+  const pick = await vscode.window.showQuickPick(items, {
+    title: '🔑 MultiHD Launcher License Configuration',
+    placeHolder: 'Select a license setting to configure',
+  });
+  if (!pick) return;
 
-    if (btn.tooltip === 'Move selected up') {
-      const i = currentOrder.indexOf(sel.basename);
-      if (i > 0) { [currentOrder[i - 1], currentOrder[i]] = [currentOrder[i], currentOrder[i - 1]]; }
-      qp.items = makeItems(currentOrder);
-    } else if (btn.tooltip === 'Move selected down') {
-      const i = currentOrder.indexOf(sel.basename);
-      if (i >= 0 && i < currentOrder.length - 1) {
-        [currentOrder[i], currentOrder[i + 1]] = [currentOrder[i + 1], currentOrder[i]];
-      }
-      qp.items = makeItems(currentOrder);
-    } else if (btn.tooltip === 'Reset order') {
-      currentOrder = [path.basename(openedFile)];
-      qp.items = makeItems(currentOrder);
-    } else if (btn.tooltip === 'Save & close') {
-      saveAndClose();
+  if (pick.action === 'browse') {
+    const uris = await vscode.window.showOpenDialog({
+      title: 'Select Questa license file',
+      filters: { 'License files': ['dat', 'lic'], 'All files': ['*'] },
+      canSelectMany: false,
+      openLabel: 'Use this license',
+    });
+    if (!uris || uris.length === 0) return;
+    const chosen = uris[0].fsPath;
+    await updateSetting('saltLicenseServer', chosen);
+    void vscode.window.showInformationMessage(`✓ SALT_LICENSE_SERVER set to: ${chosen}`);
+    refreshLauncherPanel();
+    return;
+  }
+
+  if (pick.action === 'autodetect') {
+    const detected =
+      process.env['SALT_LICENSE_SERVER'] || process.env['LM_LICENSE_FILE'] || '';
+    if (!detected) {
+      void vscode.window.showWarningMessage(
+        'No license environment variables found in current shell. Set SALT_LICENSE_SERVER in ~/.bashrc and restart VS Code.'
+      );
+      return;
     }
+    await updateSetting('saltLicenseServer', process.env['SALT_LICENSE_SERVER'] || '');
+    await updateSetting('licenseFile', process.env['LM_LICENSE_FILE'] || '');
+    void vscode.window.showInformationMessage(`✓ License auto-detected: ${detected}`);
+    refreshLauncherPanel();
+    return;
+  }
+
+  const isSalt = pick.action === 'salt';
+  const label = isSalt ? 'SALT_LICENSE_SERVER' : 'LM_LICENSE_FILE';
+  const current = isSalt ? currentSalt : currentLm;
+  const value = await vscode.window.showInputBox({
+    title: `Set ${label}`,
+    prompt:
+      'Enter full path to license file (e.g. /home/user/.licenses/questa_license.dat) or port@host',
+    value: current,
+    placeHolder: '/home/user/.licenses/questa_license.dat',
   });
+  if (value === undefined) return;
 
-  qp.onDidAccept(() => {
-    const sel = qp.activeItems[0];
-    if (!sel) return;
-    const b = sel.basename;
-    const i = currentOrder.indexOf(b);
-    if (i >= 0) currentOrder.splice(i, 1);
-    else currentOrder.push(b);
-    qp.items = makeItems(currentOrder);
-  });
-
-  const saveAndClose = () => {
-    conf.priorityList = currentOrder;
-    saveConf(confPath, conf);
-    vscode.window.showInformationMessage(`✓ Priority saved to conf.svconf (${currentOrder.length} files)`);
-    qp.dispose();
-  };
-
-  qp.show();
+  const key = isSalt ? 'saltLicenseServer' : 'licenseFile';
+  await updateSetting(key, value);
+  void vscode.window.showInformationMessage(`✓ ${label} set to: ${value}`);
+  refreshLauncherPanel();
 }
 
-// ─── conf.svconf writer ───────────────────────────────────────────────────
-
-function saveConf(confPath: string, conf: SvConf): void {
-  const modeStr = conf.compileMode === 'all' ? 'all'
-    : conf.compileMode === 'list' ? 'list'
-    : String(conf.compileMode);
-
-  let out = `# conf.svconf — Questa Launcher configuration\n`;
-  out += `# Generated by VSQuestaLauncher\n\n`;
-  out += `compile @(${modeStr})\n\n`;
-
-  if (conf.tbName) out += `@tb (${conf.tbName})\n\n`;
-
-  if (conf.tbPriorityList.length > 0) {
-    out += `@tb priority list:\n`;
-    for (const f of conf.tbPriorityList) out += `  - ${f}\n`;
-    out += `\n`;
-  }
-
-  out += `@priority list encoder:\n`;
-  for (const f of conf.priorityList) out += `  - ${f}\n`;
-  out += `\n`;
-
-  if (conf.topModule) out += `@topmodule: ${conf.topModule}\n`;
-  if (conf.vsimArgs)  out += `@vsimargs: ${conf.vsimArgs}\n`;
-  if (conf.vlogArgs)  out += `@vlogargs: ${conf.vlogArgs}\n`;
-  if (conf.workLib && conf.workLib !== 'work') out += `@work: ${conf.workLib}\n`;
-
-  fs.writeFileSync(confPath, out, 'utf8');
-}
-
-// ─── default conf.svconf template ────────────────────────────────────────
-
-function defaultConfTemplate(openedBase: string, allBases: string[]): string {
-  const tbFiles = allBases.filter(b => b.includes('_tb') || b.startsWith('tb_'));
-  const nonTbFiles = allBases.filter(b => !b.includes('_tb') && !b.startsWith('tb_'));
-  const detectedTb = tbFiles.length === 1 ? tbFiles[0]
-    : tbFiles.find(b => b === openedBase) || tbFiles[0] || '';
-
-  let out = `# conf.svconf — Questa Launcher configuration\n`;
-  out += `#\n`;
-  out += `# compile @(all)         — compile all .sv files in dir\n`;
-  out += `# compile @(list)        — compile only files in priority list\n`;
-  out += `# compile @(3)           — compile top 3 from priority list\n\n`;
-  out += `compile @(all)\n\n`;
-
-  if (detectedTb) {
-    out += `# Explicit testbench file (compiled last, highest priority for vsim)\n`;
-    out += `@tb (${detectedTb})\n\n`;
-  }
-
-  if (tbFiles.length > 0) {
-    out += `# Testbench compile order (compiled after all RTL)\n`;
-    out += `@tb priority list:\n`;
-    for (const b of tbFiles) out += `  - ${b}\n`;
-    out += `\n`;
-  }
-
-  out += `# RTL compile order (compiled first)\n`;
-  out += `@priority list encoder:\n`;
-  const openedNonTb = nonTbFiles.find(b => b === openedBase);
-  if (openedNonTb) out += `  - ${openedNonTb}    # opened file\n`;
-  for (const b of nonTbFiles.filter(b => b !== openedBase)) out += `  - ${b}\n`;
-  out += `\n`;
-
-  const topMod = detectedTb ? detectedTb.replace('.sv', '') : openedBase.replace('.sv', '');
-  out += `@topmodule: ${topMod}\n`;
-  out += `# @vsimargs: -voptargs=+acc\n`;
-  out += `# @vlogargs: -sv\n`;
-  out += `# @work: work\n`;
-  return out;
-}
-
-// ─── main run command ─────────────────────────────────────────────────────
-
-async function runCli(uri?: vscode.Uri): Promise<void> {
+/** Preserved v1.9.1 Edit conf.svconf (creates the template when missing). */
+async function cmdEditConf(uri?: vscode.Uri): Promise<void> {
   const editor = vscode.window.activeTextEditor;
-  const fileUri = uri || editor?.document.uri;
+  const fileUri = uri ?? editor?.document.uri;
   if (!fileUri) {
-    vscode.window.showErrorMessage('No .sv file open.');
+    void vscode.window.showErrorMessage('No file open.');
     return;
   }
 
-  const openedFile = fileUri.fsPath;
-  const dir = path.dirname(openedFile);
+  const dir = isValidProjectDir(fileUri.fsPath)
+    ? fileUri.fsPath
+    : path.dirname(fileUri.fsPath);
   const confPath = path.join(dir, 'conf.svconf');
-  const cfg = vscode.workspace.getConfiguration('questaLauncher');
 
-  // Collect all .sv files in directory
-  const allFiles = fs.readdirSync(dir)
-    .filter(f => f.endsWith('.sv'))
-    .map(f => path.join(dir, f));
-
-  if (allFiles.length === 0) {
-    vscode.window.showErrorMessage('No .sv files found in directory.');
-    return;
+  if (!fs.existsSync(confPath)) {
+    const allBases = scanSvFiles(dir);
+    const openedBase = path.basename(fileUri.fsPath);
+    fs.writeFileSync(confPath, defaultConfTemplate(openedBase, allBases), 'utf8');
+    void vscode.window.showInformationMessage('Created conf.svconf');
   }
 
-  const conf = parseConf(confPath);
-  const ordered = orderFiles(allFiles, openedFile, conf);
-  const runDoPath = path.join(dir, 'run.do');
-  // CLI mode: no 'add wave', ends with 'quit -f'
-  const doContent = generateRunDo(ordered, conf, cfg, 'cli');
+  const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(confPath));
+  await vscode.window.showTextDocument(doc);
+}
 
-  fs.writeFileSync(runDoPath, doContent, 'utf8');
+async function cmdHelpDocs(): Promise<void> {
+  await showHelpDocs(extensionContext);
+}
 
-  const questa = resolveQuesta(cfg);
-  const env = resolveEnv(cfg);
-  const questaDir = path.dirname(questa);
-  if (questaDir && questaDir !== '.') {
-    env['PATH'] = questaDir + ':' + (env['PATH'] || '');
-  }
+async function cmdHelpDeps(): Promise<void> {
+  await showHelpDeps(extensionContext);
+}
 
-  // Show output channel
-  const channel = vscode.window.createOutputChannel('Questa Launcher');
-  channel.show(true);
-  channel.appendLine(`▶ Questa Launcher  [CLI — headless, no waveform]`);
-  channel.appendLine(`  Dir:    ${dir}`);
-  channel.appendLine(`  Files:  ${ordered.map(f => path.basename(f)).join(', ')}`);
-  channel.appendLine(`  run.do: ${runDoPath}`);
-  channel.appendLine(`  vsim:   ${questa}`);
-  channel.appendLine('─'.repeat(60));
+// ─── command registration ──────────────────────────────────────────────────
 
-  // -c = console/batch mode (no GUI, no waveform window)
-  const proc = child_process.spawn(
-    questa,
-    ['-c', '-do', `cd ${dir}; do run.do`],
-    { cwd: dir, env, detached: false }
+type FileCommand = (uri?: vscode.Uri) => Promise<void> | void;
+type SimpleCommand = () => Promise<void> | void;
+
+function guardCommand<T extends unknown[]>(
+  handler: (...args: T) => Promise<void> | void
+): (...args: T) => Promise<void> {
+  return async (...args: T): Promise<void> => {
+    try {
+      await handler(...args);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log(`✗ ${message}`, 'red');
+      void vscode.window.showErrorMessage(`MultiHD Launcher: ${message}`);
+    }
+  };
+}
+
+/** Contract §4 legacy aliases — hidden, registered at runtime only. */
+const LEGACY_ALIASES: Array<[legacy: string, target: string]> = [
+  ['questaLauncher.run', 'multihdLauncher.run'],
+  ['questaLauncher.runGui', 'multihdLauncher.runGui'],
+  ['questaLauncher.showWaveform', 'multihdLauncher.showWaveform'],
+  ['questaLauncher.setQuestaPath', 'multihdLauncher.setConfig'],
+  ['questaLauncher.setConfig', 'multihdLauncher.setConfig'],
+  ['questaLauncher.editConf', 'multihdLauncher.editConf'],
+  ['questaLauncher.setPriority', 'multihdLauncher.setPriority'],
+  ['questaLauncher.setLicense', 'multihdLauncher.setLicense'],
+  ['questaLauncher.helpDocs', 'multihdLauncher.helpDocs'],
+  ['questaLauncher.helpDeps', 'multihdLauncher.helpDeps'],
+];
+
+function registerFileHandler(
+  handler: (uri?: vscode.Uri) => Promise<void> | void
+): (...args: unknown[]) => Promise<void> {
+  return guardCommand((...args: unknown[]) => handler(uriFromArgs(args)));
+}
+
+function registerCommands(): void {
+  // ── 17 manifest commands (package.json, Lead-owned; CONTRACT §4) ─────────
+  extensionContext.subscriptions.push(
+    vscode.commands.registerCommand(
+      'multihdLauncher.openLauncher',
+      registerFileHandler(cmdOpenLauncher)
+    ),
+    vscode.commands.registerCommand('multihdLauncher.run', registerFileHandler(cmdRunCli)),
+    vscode.commands.registerCommand('multihdLauncher.runGui', registerFileHandler(cmdRunGui)),
+    vscode.commands.registerCommand(
+      'multihdLauncher.showWaveform',
+      registerFileHandler(cmdShowWaveform)
+    ),
+    vscode.commands.registerCommand(
+      'multihdLauncher.launchQuesta',
+      registerFileHandler(cmdLaunchQuesta)
+    ),
+    vscode.commands.registerCommand(
+      'multihdLauncher.launchQuartus',
+      registerFileHandler(cmdLaunchQuartus)
+    ),
+    vscode.commands.registerCommand(
+      'multihdLauncher.launchGowin',
+      registerFileHandler(cmdLaunchGowin)
+    ),
+    vscode.commands.registerCommand('multihdLauncher.setConfig', guardCommand(() => cmdSetConfig())),
+    vscode.commands.registerCommand(
+      'multihdLauncher.setLicense',
+      guardCommand(() => cmdSetLicense())
+    ),
+    vscode.commands.registerCommand(
+      'multihdLauncher.setPriority',
+      registerFileHandler(cmdSetPriority)
+    ),
+    vscode.commands.registerCommand(
+      'multihdLauncher.excludeFiles',
+      registerFileHandler(cmdExcludeFiles)
+    ),
+    vscode.commands.registerCommand(
+      'multihdLauncher.libraryManager',
+      registerFileHandler(cmdLibraryManager)
+    ),
+    vscode.commands.registerCommand('multihdLauncher.gowinCst', registerFileHandler(cmdGowinCst)),
+    vscode.commands.registerCommand(
+      'multihdLauncher.installHelpers',
+      guardCommand(() => cmdInstallHelpers())
+    ),
+    vscode.commands.registerCommand('multihdLauncher.editConf', registerFileHandler(cmdEditConf)),
+    vscode.commands.registerCommand(
+      'multihdLauncher.helpDocs',
+      guardCommand(() => cmdHelpDocs())
+    ),
+    vscode.commands.registerCommand(
+      'multihdLauncher.helpDeps',
+      guardCommand(() => cmdHelpDeps())
+    )
   );
 
-  proc.stdout.on('data', (d: Buffer) => channel.append(d.toString()));
-  proc.stderr.on('data', (d: Buffer) => channel.append(d.toString()));
-
-  proc.on('close', (code) => {
-    channel.appendLine('─'.repeat(60));
-    if (code === 0) {
-      channel.appendLine('✓ Simulation complete.');
-      vscode.window.showInformationMessage('✓ Questa CLI simulation complete.');
-    } else {
-      channel.appendLine(`✗ Questa exited with code ${code}`);
-      vscode.window.showErrorMessage(`✗ Questa failed (exit ${code}). See Output → Questa Launcher.`);
-    }
-  });
-
-  proc.on('error', (err) => {
-    channel.appendLine(`✗ Failed to launch Questa: ${err.message}`);
-    vscode.window.showErrorMessage(`Cannot launch Questa: ${err.message}`);
-  });
+  // ── legacy v1.9.1 command IDs (hidden runtime aliases, CONTRACT §4) ──────
+  for (const [legacyId, targetId] of LEGACY_ALIASES) {
+    extensionContext.subscriptions.push(
+      vscode.commands.registerCommand(legacyId, (...args: unknown[]) => {
+        if (legacyId === 'questaLauncher.setQuestaPath') {
+          return vscode.commands.executeCommand(targetId);
+        }
+        return vscode.commands.executeCommand(targetId, ...args);
+      })
+    );
+  }
 }
 
-// ─── Help panel ───────────────────────────────────────────────────────────
+// ─── status bar (rebranded v1.9.1 button) ──────────────────────────────────
+
+function createStatusBar(): void {
+  const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  statusBar.command = 'multihdLauncher.openLauncher';
+  statusBar.text = '$(rocket) MultiHD';
+  statusBar.tooltip = 'MultiHD Launcher — open launcher';
+  statusBar.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+  extensionContext.subscriptions.push(statusBar);
+
+  const update = (): void => {
+    const filePath = vscode.window.activeTextEditor?.document.uri.fsPath ?? '';
+    statusBar.text = '$(rocket) MultiHD';
+    if (filePath.endsWith('.sv') || filePath.endsWith('.svconf')) statusBar.show();
+    else statusBar.hide();
+  };
+
+  extensionContext.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(() => update())
+  );
+  update();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Help / Dependency Resolver webviews — preserved v1.9.1 behaviour, rebranded.
+// Docs are loaded from context.extensionPath at runtime (Lead steer):
+//   help      → HELP-CONTENT.md when shipped, otherwise README.md
+//   deps      → DEPENDENCY.md
+//   commands  → COMMANDS.md (parsed into the command-reference tab)
+// ─────────────────────────────────────────────────────────────────────────────
 
 function mdToHtml(md: string): string {
   return md
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
     // headings
     .replace(/^#### (.+)$/gm, '<h4>$1</h4>')
     .replace(/^### (.+)$/gm, '<h3>$1</h3>')
     .replace(/^## (.+)$/gm, '<h2>$1</h2>')
     .replace(/^# (.+)$/gm, '<h1>$1</h1>')
     // code blocks
-    .replace(/```(\w*)\n([\s\S]*?)```/gm, (_: string, _lang: string, code: string) =>
-      `<pre><code>${code.trimEnd()}</code></pre>`)
+    .replace(
+      /```(\w*)\n([\s\S]*?)```/gm,
+      (_: string, _lang: string, code: string) => `<pre><code>${code.trimEnd()}</code></pre>`
+    )
     // inline code
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     // bold
@@ -500,8 +1127,8 @@ function mdToHtml(md: string): string {
     // table rows
     .replace(/^\|(.+)\|$/gm, (row: string) => {
       const cells = row.split('|').slice(1, -1);
-      if (cells.every((c: string) => /^[-: ]+$/.test(c))) return '';
-      return '<tr>' + cells.map((c: string) => `<td>${c.trim()}</td>`).join('') + '</tr>';
+      if (cells.every((cell: string) => /^[-: ]+$/.test(cell))) return '';
+      return '<tr>' + cells.map((cell: string) => `<td>${cell.trim()}</td>`).join('') + '</tr>';
     })
     // paragraphs (non-block lines)
     .replace(/^(?!<[hpturcode]|$)(.+)$/gm, '<p>$1</p>')
@@ -516,7 +1143,7 @@ function buildHelpPanel(
   isDeps: boolean
 ): vscode.WebviewPanel {
   const panel = vscode.window.createWebviewPanel(
-    'questaHelp',
+    'multihdHelp',
     title,
     vscode.ViewColumn.Beside,
     { enableScripts: true, retainContextWhenHidden: true }
@@ -525,11 +1152,16 @@ function buildHelpPanel(
   const body = mdToHtml(mdContent);
 
   // Parse command blocks for the run buttons (deps panel only)
-  const commandBlocks: { os: string; label: string; cmd: string; section: string; desc: string }[] = [];
+  const commandBlocks: Array<{
+    os: string;
+    label: string;
+    cmd: string;
+    section: string;
+    desc: string;
+  }> = [];
   if (isDeps) {
-    const cmdFile = fs.readFileSync(
-      path.join(context.extensionPath, 'COMMANDS.md'), 'utf8'
-    );
+    const commandsPath = path.join(context.extensionPath, 'COMMANDS.md');
+    const cmdFile = fs.existsSync(commandsPath) ? fs.readFileSync(commandsPath, 'utf8') : '';
     let lastSection = '';
     let lastHeading = '';
     let lastDesc = '';
@@ -546,23 +1178,36 @@ function buildHelpPanel(
       // ### Command heading
       if (/^### /.test(line)) {
         lastHeading = line.replace(/^#+\s*/, '').trim();
-        inBlock = false; blockLines = []; lastDesc = '';
+        inBlock = false;
+        blockLines = [];
+        lastDesc = '';
         continue;
       }
       // Fenced code block toggle
       if (line.startsWith('```')) {
-        if (!inBlock) { inBlock = true; blockLines = []; }
-        else {
+        if (!inBlock) {
+          inBlock = true;
+          blockLines = [];
+        } else {
           const cmd = blockLines.join('\n').trim();
-          if (cmd) commandBlocks.push({
-            os: lastHeading, label: lastHeading, cmd,
-            section: lastSection, desc: lastDesc
-          });
-          inBlock = false; blockLines = [];
+          if (cmd) {
+            commandBlocks.push({
+              os: lastHeading,
+              label: lastHeading,
+              cmd,
+              section: lastSection,
+              desc: lastDesc,
+            });
+          }
+          inBlock = false;
+          blockLines = [];
         }
         continue;
       }
-      if (inBlock) { blockLines.push(line); continue; }
+      if (inBlock) {
+        blockLines.push(line);
+        continue;
+      }
       // Description: non-empty non-heading text between ### and ``` becomes the desc
       const stripped = line.replace(/^>\s*/, '').trim();
       if (stripped && !stripped.startsWith('#') && !stripped.startsWith('---')) {
@@ -706,12 +1351,12 @@ function buildHelpPanel(
     </g>
     <polygon points="50,18 68,28 68,52 50,62 32,52 32,28" fill="none" stroke="#00e5ff" stroke-width="1.5" opacity="0.5"/>
     <polygon points="42,34 42,56 63,45" fill="url(#hbtn)" filter="url(#hglow)"/>
-    <text x="50" y="80" text-anchor="middle" font-family="Courier New,monospace" font-size="7" fill="#00e5ff" letter-spacing="2" opacity="0.85">QUESTA</text>
+    <text x="50" y="80" text-anchor="middle" font-family="Courier New,monospace" font-size="7" fill="#00e5ff" letter-spacing="2" opacity="0.85">MULTIHD</text>
     <text x="50" y="89" text-anchor="middle" font-family="Courier New,monospace" font-size="5" fill="#446688" letter-spacing="1.5">LAUNCHER</text>
   </svg>
   <div>
     <h1>${title}</h1>
-    <p>VSQuestaLauncher v1.9 — SystemVerilog simulation for VS Code</p>
+    <p>MultiHD Launcher v2.0.0 — Questa FSE · Quartus Prime · Gowin EDA</p>
   </div>
 </div>
 
@@ -944,13 +1589,15 @@ if (document.getElementById('deps').classList.contains('active')) buildDepBlocks
 }
 
 async function showHelpDocs(context: vscode.ExtensionContext): Promise<void> {
-  const mdPath = path.join(context.extensionPath, 'README.md');
+  const helpContentPath = path.join(context.extensionPath, 'HELP-CONTENT.md');
+  const readmePath = path.join(context.extensionPath, 'README.md');
+  const mdPath = fs.existsSync(helpContentPath) ? helpContentPath : readmePath;
   const md = fs.existsSync(mdPath) ? fs.readFileSync(mdPath, 'utf8') : '# README not found';
-  const panel = buildHelpPanel(context, '❓ VSQuestaLauncher Help', md, false);
-  panel.webview.onDidReceiveMessage(async msg => {
+  const panel = buildHelpPanel(context, '❓ MultiHD Launcher Help', md, false);
+  panel.webview.onDidReceiveMessage(async (msg) => {
     if (msg.type === 'copy') {
       await vscode.env.clipboard.writeText(msg.text);
-      vscode.window.showInformationMessage('Copied to clipboard.');
+      void vscode.window.showInformationMessage('Copied to clipboard.');
     }
   });
 }
@@ -960,447 +1607,85 @@ async function showHelpDeps(context: vscode.ExtensionContext): Promise<void> {
   const md = fs.existsSync(mdPath) ? fs.readFileSync(mdPath, 'utf8') : '# DEPENDENCY.md not found';
   const panel = buildHelpPanel(context, '📦 Dependency Resolver', md, true);
 
-  const terminal = vscode.window.createTerminal('Questa Dep Installer');
+  const terminal = vscode.window.createTerminal('MultiHD Dependency Installer');
 
-  panel.webview.onDidReceiveMessage(async msg => {
+  panel.webview.onDidReceiveMessage(async (msg) => {
     if (msg.type === 'copy') {
       await vscode.env.clipboard.writeText(msg.text);
-      vscode.window.showInformationMessage('📋 Copied to clipboard.');
-      panel.webview.postMessage({ type: 'copied' });
+      void vscode.window.showInformationMessage('📋 Copied to clipboard.');
+      void panel.webview.postMessage({ type: 'copied' });
     }
     if (msg.type === 'runCmd') {
       terminal.show(true);
-      const lines = msg.cmd.split('\n').filter((l: string) => l.trim() && !l.trim().startsWith('#'));
-      for (const line of lines) {
-        terminal.sendText(line);
-      }
-      panel.webview.postMessage({ type: 'cmdResult', text: `✓ Sent to terminal: "${msg.label}"`, ok: true });
+      const lines: string[] = msg.cmd
+        .split('\n')
+        .filter((line: string) => line.trim() && !line.trim().startsWith('#'));
+      for (const line of lines) terminal.sendText(line);
+      void panel.webview.postMessage({
+        type: 'cmdResult',
+        text: `✓ Sent to terminal: "${msg.label}"`,
+        ok: true,
+      });
     }
     if (msg.type === 'getCommands') {
       const cmdPath = path.join(context.extensionPath, 'COMMANDS.md');
       const cmdMd = fs.existsSync(cmdPath) ? fs.readFileSync(cmdPath, 'utf8') : '';
-      panel.webview.postMessage({ type: 'cmdRef', html: mdToHtml(cmdMd) });
+      void panel.webview.postMessage({ type: 'cmdRef', html: mdToHtml(cmdMd) });
     }
   });
 }
 
+// ─── activation / deactivation ──────────────────────────────────────────────
 
-
-async function runQuestaGui(uri?: vscode.Uri): Promise<void> {
-  const editor = vscode.window.activeTextEditor;
-  const fileUri = uri || editor?.document.uri;
-  if (!fileUri) { vscode.window.showErrorMessage('No .sv file open.'); return; }
-
-  const openedFile = fileUri.fsPath;
-  const dir = path.dirname(openedFile);
-  const confPath = path.join(dir, 'conf.svconf');
-  const cfg = vscode.workspace.getConfiguration('questaLauncher');
-
-  const allFiles = fs.readdirSync(dir)
-    .filter((f: string) => f.endsWith('.sv'))
-    .map((f: string) => path.join(dir, f));
-
-  if (allFiles.length === 0) { vscode.window.showErrorMessage('No .sv files found in directory.'); return; }
-
-  const conf = parseConf(confPath);
-  const ordered = orderFiles(allFiles, openedFile, conf);
-  const runDoPath = path.join(dir, 'run.do');
-
-  // GUI mode: vlib + vlog + vopt + vsim + add wave -r /* + run -all (no quit — keeps GUI open)
-  const guiDo = generateRunDo(ordered, conf, cfg, 'gui');
-  fs.writeFileSync(runDoPath, guiDo, 'utf8');
-
-  const questa = resolveQuesta(cfg);
-  const env = resolveEnv(cfg);
-  const questaDir = path.dirname(questa);
-  if (questaDir && questaDir !== '.') env['PATH'] = questaDir + ':' + (env['PATH'] || '');
-
-  // Derive top module name for log
-  const conf2 = parseConf(confPath);
-  const tbFile2 = conf2.tbName
-    || ordered.map((f: string) => path.basename(f)).find((b: string) => b.includes('_tb') || b.startsWith('tb_'))
-    || '';
-  const topModule2 = conf2.topModule
-    || (tbFile2 ? tbFile2.replace(/\.sv$/i, '') : '')
-    || path.basename(ordered[ordered.length - 1]).replace(/\.sv$/i, '');
-
-  const channel = vscode.window.createOutputChannel('Questa Launcher');
-  channel.show(true);
-  channel.appendLine(`🖥 Questa Launcher  [GUI — with waveforms]`);
-  channel.appendLine(`  Dir:   ${dir}`);
-  channel.appendLine(`  Files: ${ordered.map((f: string) => path.basename(f)).join(', ')}`);
-  channel.appendLine(`  Top:   ${topModule2}`);
-  channel.appendLine(`  run.do: ${runDoPath}`);
-  channel.appendLine('─'.repeat(60));
-
-  // Launch WITHOUT -c so the GUI opens.
-  // Pass run.do by absolute path — avoids inline TCL semicolon parsing issues.
-  // stdio: pipe stderr so errors appear in the Output channel instead of vanishing silently.
-  const proc = child_process.spawn(
-    questa,
-    ['-do', runDoPath],
-    { cwd: dir, env, detached: true, stdio: ['ignore', 'ignore', 'pipe'] }
-  );
-
-  proc.stderr.on('data', (d: Buffer) => {
-    const txt = d.toString();
-    channel.append(txt);
-  });
-
-  proc.on('error', (err: NodeJS.ErrnoException) => {
-    channel.appendLine(`✗ Failed to launch Questa GUI: ${err.message}`);
-    if (err.code === 'ENOENT') {
-      channel.appendLine(`  → vsim not found at: ${questa}`);
-      channel.appendLine(`  → Set the correct path via the ⚙ Set Questa Path button.`);
-    }
-    vscode.window.showErrorMessage(
-      `Cannot launch Questa GUI: ${err.message}. Use ⚙ Set Questa Path to fix.`,
-      'Set Questa Path'
-    ).then(sel => { if (sel) vscode.commands.executeCommand('questaLauncher.setQuestaPath'); });
-  });
-
-  proc.unref();
-
-  vscode.window.showInformationMessage(`🖥 Questa GUI launched for ${topModule2} — waveforms loading automatically.`);
-  channel.appendLine(`✓ Questa GUI launched (PID detached). Close the Questa window when done.`);
-  channel.appendLine(`  DISPLAY: ${env['DISPLAY'] || '(not set)'}`);
-  channel.appendLine(`  vsim:    ${questa}`);
-}
-
-
-
-// ─── show waveform (open existing vsim.wlf in GUI) ───────────────────────
-
-async function showWaveform(uri?: vscode.Uri): Promise<void> {
-  const editor = vscode.window.activeTextEditor;
-  const fileUri = uri || editor?.document.uri;
-  if (!fileUri) { vscode.window.showErrorMessage('No .sv file open.'); return; }
-
-  const dir = path.dirname(fileUri.fsPath);
-  const wlfPath = path.join(dir, 'vsim.wlf');
-  const cfg = vscode.workspace.getConfiguration('questaLauncher');
-
-  // If no WLF yet, prompt user to run a simulation first
-  if (!fs.existsSync(wlfPath)) {
-    const choice = await vscode.window.showWarningMessage(
-      'No vsim.wlf found in this directory. Run a simulation first to generate the waveform file.',
-      'Run CLI (headless)',
-      'Run GUI (with waveforms)'
+function createLibraryManager(context: vscode.ExtensionContext): LibraryManager | undefined {
+  try {
+    return LibraryManager.createDefault();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    outputChannel.appendLine(
+      `⚠ Could not open ~/.questa_libs (${message}) — using extension storage instead.`
     );
-    if (choice === 'Run CLI (headless)') await runCli(uri);
-    else if (choice === 'Run GUI (with waveforms)') await runQuestaGui(uri);
-    return;
-  }
-
-  const questa = resolveQuesta(cfg);
-  const env = resolveEnv(cfg);
-  const questaDir = path.dirname(questa);
-  if (questaDir && questaDir !== '.') env['PATH'] = questaDir + ':' + (env['PATH'] || '');
-
-  // Write a small wave.do using the official Questa waveform command from run.do
-  const waveDo = path.join(dir, 'wave.do');
-  fs.writeFileSync(waveDo,
-    `# wave.do — generated by VSQuestaLauncher (Show WaveForm)\n` +
-    `add wave -r /*\n` +
-    `wave zoom full\n`,
-    'utf8'
-  );
-
-  const channel = vscode.window.createOutputChannel('Questa Launcher');
-  channel.show(true);
-  channel.appendLine(`〰 Questa Launcher  [Show WaveForm only]`);
-  channel.appendLine(`  WLF:    ${wlfPath}`);
-  channel.appendLine(`  wave.do: ${waveDo}`);
-  channel.appendLine(`  vsim:   ${questa}`);
-  channel.appendLine('─'.repeat(60));
-
-  // Launch Questa GUI to view the existing WLF.
-  // -view <wlf>  loads the saved simulation log (no re-run)
-  // -do <wave.do> executes add wave -r /* + wave zoom full after loading
-  const proc = child_process.spawn(
-    questa,
-    ['-view', wlfPath, '-do', waveDo],
-    { cwd: dir, env, detached: true, stdio: ['ignore', 'ignore', 'pipe'] }
-  );
-
-  proc.stderr.on('data', (d: Buffer) => channel.append(d.toString()));
-
-  proc.on('error', (err: NodeJS.ErrnoException) => {
-    channel.appendLine(`✗ Failed to launch WaveForm viewer: ${err.message}`);
-    if (err.code === 'ENOENT') {
-      channel.appendLine(`  → vsim not found at: ${questa}`);
-      channel.appendLine(`  → Use ⚙ Set Questa Path to fix.`);
-    }
-    vscode.window.showErrorMessage(
-      `Cannot open WaveForm: ${err.message}`,
-      'Set Questa Path'
-    ).then(sel => { if (sel) vscode.commands.executeCommand('questaLauncher.setQuestaPath'); });
-  });
-
-  proc.unref();
-
-  vscode.window.showInformationMessage(`〰 WaveForm viewer opened — loading vsim.wlf`);
-  channel.appendLine(`✓ Questa WaveForm viewer launched (PID detached).`);
-  channel.appendLine(`  DISPLAY: ${env['DISPLAY'] || '(not set)'}`);
-  channel.appendLine(`  vsim:    ${questa}`);
-}
-
-
-
-// ─── Set Questa path ──────────────────────────────────────────────────────
-
-async function setQuestaPath(): Promise<void> {
-  const cfg = vscode.workspace.getConfiguration('questaLauncher');
-  const current = cfg.get<string>('questaBin') || '';
-
-  // Show current resolved path for context
-  const resolved = resolveQuesta(cfg);
-
-  const choice = await vscode.window.showQuickPick([
-    {
-      label: '$(folder-opened)  Browse for vsim binary or its folder…',
-      detail: 'Opens a file picker — select the vsim binary or its parent folder',
-      id: 'browse'
-    },
-    {
-      label: '$(edit)  Type path manually',
-      detail: current ? `Current: ${current}` : 'No path set — will type the bin directory',
-      id: 'type'
-    },
-    {
-      label: '$(search)  Auto-detect from PATH',
-      detail: 'Runs `which vsim` and saves the detected directory',
-      id: 'auto'
-    },
-    {
-      label: '$(info)  Show current resolved path',
-      detail: resolved,
-      id: 'show'
-    }
-  ], {
-    title: '⚙ Set Questa Binary Path',
-    placeHolder: current || 'No questaBin set — type, browse, or auto-detect'
-  }) as { label: string; detail: string; id: string } | undefined;
-
-  if (!choice) return;
-
-  if (choice.id === 'browse') {
-    const uris = await vscode.window.showOpenDialog({
-      title: 'Select vsim binary or its folder',
-      canSelectFiles: true,
-      canSelectFolders: true,
-      canSelectMany: false,
-      openLabel: 'Use this vsim / folder'
-    });
-    if (!uris || !uris[0]) return;
-    const selected = uris[0].fsPath;
-    const stat = fs.statSync(selected);
-    const binDir = stat.isDirectory() ? selected : path.dirname(selected);
-    await cfg.update('questaBin', binDir, vscode.ConfigurationTarget.Global);
-    vscode.window.showInformationMessage(`✓ Questa bin path set to: ${binDir}`);
-    return;
-  }
-
-  if (choice.id === 'type') {
-    const input = await vscode.window.showInputBox({
-      title: '⚙ Questa Bin Directory',
-      prompt: 'Full path to the Questa linux_x86_64 (or win64) bin directory',
-      placeHolder: '/home/user/altera/25.1std/questa_fse/linux_x86_64',
-      value: current,
-      validateInput: val => {
-        if (!val.trim()) return 'Path cannot be empty';
-        const vsimPath = path.join(val.trim(), 'vsim');
-        if (!fs.existsSync(vsimPath) && !fs.existsSync(vsimPath + '.exe')) {
-          return `⚠ vsim not found in "${val}" — double-check the path (saved anyway)`;
-        }
-        return undefined;
-      }
-    });
-    if (input === undefined) return;
-    await cfg.update('questaBin', input.trim(), vscode.ConfigurationTarget.Global);
-    vscode.window.showInformationMessage(`✓ Questa bin path set to: ${input.trim()}`);
-    return;
-  }
-
-  if (choice.id === 'auto') {
     try {
-      const found = child_process.execSync('which vsim 2>/dev/null').toString().trim();
-      if (found) {
-        const binDir = path.dirname(found);
-        await cfg.update('questaBin', binDir, vscode.ConfigurationTarget.Global);
-        vscode.window.showInformationMessage(`✓ Auto-detected Questa bin: ${binDir}`);
-      } else {
-        vscode.window.showWarningMessage(
-          'vsim not found on PATH. Install Questa FSE or set the path manually.',
-          'Type Path'
-        ).then(sel => { if (sel) vscode.commands.executeCommand('questaLauncher.setQuestaPath'); });
-      }
+      const fallbackRoot = path.join(context.globalStorageUri.fsPath, 'questa_libs');
+      fs.mkdirSync(fallbackRoot, { recursive: true });
+      return new LibraryManager(
+        path.join(fallbackRoot, 'registry.json'),
+        path.join(fallbackRoot, 'work')
+      );
     } catch {
-      vscode.window.showWarningMessage('Could not run `which vsim`. Set the path manually.');
+      return undefined;
     }
-    return;
-  }
-
-  if (choice.id === 'show') {
-    vscode.window.showInformationMessage(`Questa bin: ${resolved}`);
   }
 }
-
-
-async function setLicense(): Promise<void> {
-  const cfg = vscode.workspace.getConfiguration('questaLauncher');
-  const currentSalt = cfg.get<string>('saltLicenseServer') || process.env['SALT_LICENSE_SERVER'] || '';
-  const currentLm   = cfg.get<string>('licenseFile') || process.env['LM_LICENSE_FILE'] || '';
-
-  type LicItem = vscode.QuickPickItem & { action: string };
-
-  const items: LicItem[] = [
-    {
-      label:       '$(key) SALT_LICENSE_SERVER',
-      description: currentSalt || '(not set)',
-      detail:      'Questa FSE / Starter Edition — path to .dat file or port@host',
-      action:      'salt'
-    },
-    {
-      label:       '$(file) LM_LICENSE_FILE',
-      description: currentLm || '(not set)',
-      detail:      'General FlexLM — path to license file or port@host',
-      action:      'lm'
-    },
-    {
-      label:       '$(folder-opened) Browse for license file…',
-      description: '',
-      detail:      'Open a file picker to locate your .dat / .lic file',
-      action:      'browse'
-    },
-    {
-      label:       '$(refresh) Auto-detect from environment',
-      description: '',
-      detail:      'Re-read SALT_LICENSE_SERVER / LM_LICENSE_FILE from your shell environment',
-      action:      'autodetect'
-    }
-  ];
-
-  const pick = await vscode.window.showQuickPick(items, {
-    title: '🔑 Questa License Configuration',
-    placeHolder: 'Select a license setting to configure'
-  });
-  if (!pick) return;
-
-  if (pick.action === 'browse') {
-    const uris = await vscode.window.showOpenDialog({
-      title: 'Select Questa license file',
-      filters: { 'License files': ['dat', 'lic'], 'All files': ['*'] },
-      canSelectMany: false,
-      openLabel: 'Use this license'
-    });
-    if (!uris || uris.length === 0) return;
-    const chosen = uris[0].fsPath;
-    await cfg.update('saltLicenseServer', chosen, vscode.ConfigurationTarget.Global);
-    vscode.window.showInformationMessage(`✓ SALT_LICENSE_SERVER set to: ${chosen}`);
-    return;
-  }
-
-  if (pick.action === 'autodetect') {
-    const detected = process.env['SALT_LICENSE_SERVER'] || process.env['LM_LICENSE_FILE'] || '';
-    if (!detected) {
-      vscode.window.showWarningMessage('No license environment variables found in current shell. Set SALT_LICENSE_SERVER in ~/.bashrc and restart VS Code.');
-      return;
-    }
-    await cfg.update('saltLicenseServer', process.env['SALT_LICENSE_SERVER'] || '', vscode.ConfigurationTarget.Global);
-    await cfg.update('licenseFile',       process.env['LM_LICENSE_FILE']     || '', vscode.ConfigurationTarget.Global);
-    vscode.window.showInformationMessage(`✓ License auto-detected: ${detected}`);
-    return;
-  }
-
-  // Manual text entry for salt or lm
-  const isSalt = pick.action === 'salt';
-  const label   = isSalt ? 'SALT_LICENSE_SERVER' : 'LM_LICENSE_FILE';
-  const current = isSalt ? currentSalt : currentLm;
-  const value   = await vscode.window.showInputBox({
-    title:       `Set ${label}`,
-    prompt:      'Enter full path to license file (e.g. /home/user/.licenses/questa_license.dat) or port@host',
-    value:       current,
-    placeHolder: '/home/bismillah/.licenses/questa_license.dat'
-  });
-  if (value === undefined) return;
-
-  const key = isSalt ? 'saltLicenseServer' : 'licenseFile';
-  await cfg.update(key, value, vscode.ConfigurationTarget.Global);
-  vscode.window.showInformationMessage(`✓ ${label} set to: ${value}`);
-}
-
-
-
-async function editConf(uri?: vscode.Uri): Promise<void> {
-  const editor = vscode.window.activeTextEditor;
-  const fileUri = uri || editor?.document.uri;
-  if (!fileUri) { vscode.window.showErrorMessage('No file open.'); return; }
-
-  const dir = path.dirname(fileUri.fsPath);
-  const confPath = path.join(dir, 'conf.svconf');
-
-  if (!fs.existsSync(confPath)) {
-    const allBases = fs.readdirSync(dir).filter(f => f.endsWith('.sv'));
-    const openedBase = path.basename(fileUri.fsPath);
-    fs.writeFileSync(confPath, defaultConfTemplate(openedBase, allBases), 'utf8');
-    vscode.window.showInformationMessage('Created conf.svconf');
-  }
-
-  const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(confPath));
-  await vscode.window.showTextDocument(doc);
-}
-
-// ─── set priority ─────────────────────────────────────────────────────────
-
-async function setPriority(uri?: vscode.Uri): Promise<void> {
-  const editor = vscode.window.activeTextEditor;
-  const fileUri = uri || editor?.document.uri;
-  if (!fileUri) { vscode.window.showErrorMessage('No .sv file open.'); return; }
-
-  const dir = path.dirname(fileUri.fsPath);
-  const confPath = path.join(dir, 'conf.svconf');
-  const allFiles = fs.readdirSync(dir)
-    .filter(f => f.endsWith('.sv'))
-    .map(f => path.join(dir, f));
-
-  await runPriorityPicker(allFiles, fileUri.fsPath, confPath);
-}
-
-// ─── activation ───────────────────────────────────────────────────────────
 
 export function activate(context: vscode.ExtensionContext): void {
-  context.subscriptions.push(
-    vscode.commands.registerCommand('questaLauncher.run',            runCli),
-    vscode.commands.registerCommand('questaLauncher.runGui',         runQuestaGui),
-    vscode.commands.registerCommand('questaLauncher.showWaveform',   showWaveform),
-    vscode.commands.registerCommand('questaLauncher.setQuestaPath',  setQuestaPath),
-    vscode.commands.registerCommand('questaLauncher.editConf',       editConf),
-    vscode.commands.registerCommand('questaLauncher.setPriority',    setPriority),
-    vscode.commands.registerCommand('questaLauncher.setLicense',     setLicense),
-    vscode.commands.registerCommand('questaLauncher.helpDocs', () => showHelpDocs(context)),
-    vscode.commands.registerCommand('questaLauncher.helpDeps', () => showHelpDeps(context))
-  );
+  extensionContext = context;
 
-  // Status bar button
-  const sb = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-  sb.command = 'questaLauncher.run';
-  sb.text = '$(play) Questa';
-  sb.tooltip = 'Run in Questa Simulator';
-  sb.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
-  context.subscriptions.push(sb);
+  outputChannel = vscode.window.createOutputChannel('MultiHD Launcher');
+  context.subscriptions.push(outputChannel);
 
-  const updateSb = () => {
-    const ext = vscode.window.activeTextEditor?.document.uri.fsPath;
-    sb.text = ext?.endsWith('.sv') ? '$(play) Questa' : '$(play) Questa';
-    if (ext?.endsWith('.sv') || ext?.endsWith('.svconf')) sb.show();
-    else sb.hide();
-  };
+  projectState = new ProjectStateStore(context.workspaceState);
+  libraryManager = createLibraryManager(context);
+  currentProjectDir = resolveProjectDirSync() ?? '';
 
-  context.subscriptions.push(
-    vscode.window.onDidChangeActiveTextEditor(updateSb)
-  );
-  updateSb();
+  registerCommands();
+  createStatusBar();
+
+  const version =
+    (context.extension.packageJSON as { version?: string } | undefined)?.version ?? '2.0.0';
+  log(`⬡ MultiHD Launcher v${version} — Questa FSE • Quartus Prime • Gowin EDA`, 'cyan');
+  log('  Ready — open 🚀 MultiHD Launcher from the editor title bar.', 'dim');
 }
 
-export function deactivate(): void {}
+export function deactivate(): void {
+  if (launcherPanel) {
+    try {
+      launcherPanel.dispose();
+    } catch {
+      // already disposed
+    }
+    launcherPanel = undefined;
+  }
+}
+
+

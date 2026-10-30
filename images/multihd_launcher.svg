@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs><linearGradient id="g" x1="0" x2="1"><stop offset="0" stop-color="#0070b8"/><stop offset="1" stop-color="#00d4f0"/></linearGradient></defs>
+  <rect width="256" height="256" rx="36" fill="#0d0d1a"/>
+  <g fill="none" stroke="#00e5ff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M24 58 L24 24 L58 24"/><path d="M198 24 L232 24 L232 58"/>
+    <path d="M24 198 L24 232 L58 232"/><path d="M232 198 L232 232 L198 232"/>
+  </g>
+  <path d="M128 50 L184 82.5 L184 147.5 L128 180 L72 147.5 L72 82.5 Z" fill="none" stroke="#1e90b8" stroke-width="3.5" stroke-linejoin="round"/>
+  <path d="M108 88 L108 142 L158 115 Z" fill="url(#g)"/>
+  <text x="128" y="212" text-anchor="middle" font-family="'Courier New',monospace" font-size="20" font-weight="bold" fill="#00e5ff" letter-spacing="5">MULTI</text>
+  <text x="128" y="234" text-anchor="middle" font-family="'Courier New',monospace" font-size="10" fill="#00e5ff" letter-spacing="3">HD LAUNCHER</text>
+</svg>
